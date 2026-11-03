@@ -219,28 +219,50 @@ func (c *Client) Upload(ctx context.Context, doc Document) (string, error) {
 	return taskID, nil
 }
 
+// taskRecord covers both task shapes: API v9 sends a bare list with
+// uppercase states, result and related_document; v10 (Paperless 3)
+// paginates, lowercases states and moves the outcome into result_data.
+type taskRecord struct {
+	Status          string          `json:"status"`
+	Result          *string         `json:"result"`
+	RelatedDocument json.RawMessage `json:"related_document"`
+	ResultData      *struct {
+		DocumentID   json.RawMessage `json:"document_id"`
+		DuplicateOf  json.RawMessage `json:"duplicate_of"`
+		Reason       string          `json:"reason"`
+		ErrorMessage string          `json:"error_message"`
+	} `json:"result_data"`
+}
+
 // Task reports how consumption of an upload is going.
 func (c *Client) Task(ctx context.Context, taskID string) (Task, error) {
-	var tasks []struct {
-		Status          string          `json:"status"`
-		Result          *string         `json:"result"`
-		RelatedDocument json.RawMessage `json:"related_document"`
-	}
-	if err := c.getJSON(ctx, "/api/tasks/?task_id="+url.QueryEscape(taskID), &tasks); err != nil {
+	path := "/api/tasks/?task_id=" + url.QueryEscape(taskID)
+	var raw json.RawMessage
+	if err := c.getJSON(ctx, path, &raw); err != nil {
 		return Task{}, err
+	}
+	var tasks []taskRecord
+	if err := json.Unmarshal(raw, &tasks); err != nil {
+		var page struct {
+			Results []taskRecord `json:"results"`
+		}
+		if json.Unmarshal(raw, &page) != nil {
+			return Task{}, fmt.Errorf("paperless: decode %s: %w", path, err)
+		}
+		tasks = page.Results
 	}
 	if len(tasks) == 0 {
 		return Task{Status: TaskQueued}, nil
 	}
 	t := tasks[0]
-	out := Task{}
-	if t.Result != nil {
-		out.Message = *t.Result
-	}
-	switch t.Status {
+	out := Task{Message: t.message()}
+	switch strings.ToUpper(t.Status) {
 	case "SUCCESS":
 		out.Status = TaskDone
 		out.DocumentID = documentID(t.RelatedDocument)
+		if out.DocumentID == 0 && t.ResultData != nil {
+			out.DocumentID = documentID(t.ResultData.DocumentID)
+		}
 	case "FAILURE", "REVOKED":
 		out.Status = TaskFailed
 	case "STARTED":
@@ -249,6 +271,23 @@ func (c *Client) Task(ctx context.Context, taskID string) (Task, error) {
 		out.Status = TaskQueued
 	}
 	return out, nil
+}
+
+// message mirrors how Paperless itself turns v10 result_data back into
+// the v9 result text, leaving out the success line nobody shows.
+func (t taskRecord) message() string {
+	switch {
+	case t.Result != nil:
+		return *t.Result
+	case t.ResultData == nil:
+		return ""
+	case t.ResultData.Reason != "":
+		return t.ResultData.Reason
+	case documentID(t.ResultData.DuplicateOf) != 0:
+		return fmt.Sprintf("It is a duplicate of document #%d", documentID(t.ResultData.DuplicateOf))
+	default:
+		return t.ResultData.ErrorMessage
+	}
 }
 
 // documentID reads related_document, which Paperless has sent both as a

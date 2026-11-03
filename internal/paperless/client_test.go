@@ -141,6 +141,15 @@ func TestTask(t *testing.T) {
 		`[{"status":"SUCCESS","result":"Success","related_document":"42"}]`:           {Status: TaskDone, DocumentID: 42, Message: "Success"},
 		`[{"status":"SUCCESS","related_document":43}]`:                                {Status: TaskDone, DocumentID: 43},
 		`[{"status":"FAILURE","result":"Not consuming scan.pdf: It is a duplicate"}]`: {Status: TaskFailed, Message: "Not consuming scan.pdf: It is a duplicate"},
+
+		`{"count":0,"next":null,"results":[]}`:                                                                {Status: TaskQueued},
+		`{"results":[{"status":"pending","result_data":null}]}`:                                               {Status: TaskQueued},
+		`{"results":[{"status":"started"}]}`:                                                                  {Status: TaskProcessing},
+		`{"results":[{"status":"success","result_data":{"document_id":1158},"related_document_ids":[1158]}]}`: {Status: TaskDone, DocumentID: 1158},
+		`{"results":[{"status":"failure","result_data":{"duplicate_of":12}}]}`:                                {Status: TaskFailed, Message: "It is a duplicate of document #12"},
+		`{"results":[{"status":"failure","result_data":{"reason":"Unsupported type"}}]}`:                      {Status: TaskFailed, Message: "Unsupported type"},
+		`{"results":[{"status":"failure","result_data":{"error_message":"OCR failed"}}]}`:                     {Status: TaskFailed, Message: "OCR failed"},
+		`{"results":[{"status":"revoked"}]}`:                                                                  {Status: TaskFailed},
 	}
 	for body, want := range cases {
 		c := fakePaperless(t, func(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +166,12 @@ func TestTask(t *testing.T) {
 	c := fakePaperless(t, func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", http.StatusBadGateway) })
 	if _, err := c.Task(context.Background(), "abc"); err == nil {
 		t.Error("expected an error")
+	}
+	for _, body := range []string{"not json", `"a string"`} {
+		c := fakePaperless(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) })
+		if _, err := c.Task(context.Background(), "abc"); err == nil {
+			t.Errorf("%s: expected a decode error", body)
+		}
 	}
 }
 
