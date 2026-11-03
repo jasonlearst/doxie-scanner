@@ -3,3 +3,6 @@
 coverage.out
 coverage.filtered.out
 coverage.html
+
+# Local secrets (Paperless URL/token for development)
+.env.local

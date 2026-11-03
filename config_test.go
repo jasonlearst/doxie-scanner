@@ -35,3 +35,14 @@ func TestLoadConfig_Overrides(t *testing.T) {
 		t.Errorf("DriverName = %q", cfg.DriverName)
 	}
 }
+
+func TestLoadConfig_Paperless(t *testing.T) {
+	env := map[string]string{"DOXIE_PAPERLESS_URL": "https://paperless.lan", "DOXIE_PAPERLESS_TOKEN": "t0k"}
+	cfg := loadConfig(func(k string) string { return env[k] })
+	if cfg.PaperlessURL != "https://paperless.lan" || cfg.PaperlessToken != "t0k" {
+		t.Errorf("got %+v", cfg)
+	}
+	if cfg := loadConfig(func(string) string { return "" }); cfg.PaperlessURL != "" || cfg.PaperlessToken != "" {
+		t.Errorf("unset means disabled, got %+v", cfg)
+	}
+}

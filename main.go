@@ -14,6 +14,7 @@ import (
 	"github.com/andiapps-dev/doxie-scanner/internal/api"
 	_ "github.com/andiapps-dev/doxie-scanner/internal/doxiedx400" // registers the "doxie-dx400" driver
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
+	"github.com/andiapps-dev/doxie-scanner/internal/paperless"
 	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 	"github.com/andiapps-dev/doxie-scanner/internal/web"
@@ -51,7 +52,12 @@ func main() {
 
 	mgr := scanjobs.NewManager(drv, store)
 	go mgr.Run(context.Background())
-	srv := api.NewServer(drv, mgr, store, web.FS(), version)
+	var opts []api.Option
+	if cfg.PaperlessURL != "" && cfg.PaperlessToken != "" {
+		opts = append(opts, api.WithPaperless(paperless.New(cfg.PaperlessURL, cfg.PaperlessToken)))
+		log.Printf("sending to Paperless at %s", cfg.PaperlessURL)
+	}
+	srv := api.NewServer(drv, mgr, store, web.FS(), version, opts...)
 
 	log.Printf("doxie-scanner %s listening on %s (driver=%s)", version, cfg.ListenAddr, cfg.DriverName)
 	log.Fatal(http.ListenAndServe(cfg.ListenAddr, srv))

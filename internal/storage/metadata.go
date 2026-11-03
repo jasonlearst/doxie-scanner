@@ -53,15 +53,28 @@ type PageMeta struct {
 // JobMeta is the full persisted record for one scan job, stored as
 // meta.json inside that job's directory.
 type JobMeta struct {
-	ID          string       `json:"id"`
-	Name        string       `json:"name"`
-	Driver      string       `json:"driver"`
-	CreatedAt   time.Time    `json:"createdAt"`
-	CompletedAt *time.Time   `json:"completedAt,omitempty"`
-	Status      JobStatus    `json:"status"`
-	Settings    ScanSettings `json:"settings"`
-	Pages       []PageMeta   `json:"pages"`
-	Error       string       `json:"error,omitempty"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Driver      string         `json:"driver"`
+	CreatedAt   time.Time      `json:"createdAt"`
+	CompletedAt *time.Time     `json:"completedAt,omitempty"`
+	Status      JobStatus      `json:"status"`
+	Settings    ScanSettings   `json:"settings"`
+	Pages       []PageMeta     `json:"pages"`
+	Sent        []SentDocument `json:"sent,omitempty"`
+	Error       string         `json:"error,omitempty"`
+}
+
+// SentDocument records one upload to Paperless and how its consumption
+// went, so the job shows what has already been filed.
+type SentDocument struct {
+	Title      string    `json:"title"`
+	Pages      []string  `json:"pages"`
+	TaskID     string    `json:"taskId,omitempty"`
+	Status     string    `json:"status"` // queued, processing, done or failed
+	DocumentID int       `json:"documentId,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	SentAt     time.Time `json:"sentAt"`
 }
 
 // VisiblePages are the pages that export and upload by default.

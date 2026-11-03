@@ -4,8 +4,10 @@ import (
 	"io/fs"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
+	"github.com/andiapps-dev/doxie-scanner/internal/paperless"
 	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
@@ -25,12 +27,26 @@ type Server struct {
 	// 600 dpi page is ~135 MB decoded, which a 1 GB Raspberry Pi can only
 	// afford once.
 	renderSlot chan struct{}
+
+	paperless *paperless.Client // nil when not configured
+	now       func() time.Time
+}
+
+// Option configures optional integrations.
+type Option func(*Server)
+
+// WithPaperless enables sending pages to a Paperless-ngx instance.
+func WithPaperless(c *paperless.Client) Option {
+	return func(s *Server) { s.paperless = c }
 }
 
 // NewServer builds a Server and wires its full route table. staticFS
 // serves the embedded frontend at "/"; it may be nil in tests.
-func NewServer(drv driver.Driver, jobs *scanjobs.Manager, store *storage.Store, staticFS fs.FS, version string) *Server {
-	s := &Server{drv: drv, jobs: jobs, store: store, version: version, renderSlot: make(chan struct{}, 1)}
+func NewServer(drv driver.Driver, jobs *scanjobs.Manager, store *storage.Store, staticFS fs.FS, version string, opts ...Option) *Server {
+	s := &Server{drv: drv, jobs: jobs, store: store, version: version, renderSlot: make(chan struct{}, 1), now: time.Now}
+	for _, opt := range opts {
+		opt(s)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/version", s.handleVersion)
@@ -45,6 +61,10 @@ func NewServer(drv driver.Driver, jobs *scanjobs.Manager, store *storage.Store, 
 	mux.HandleFunc("PATCH /api/scans/{id}", s.handleRenameScan)
 	mux.HandleFunc("DELETE /api/scans/{id}", s.handleDeleteScan)
 	mux.HandleFunc("GET /api/scans/{id}/pdf", s.handleJobPDF)
+	mux.HandleFunc("POST /api/scans/{id}/send", s.handleSend)
+	mux.HandleFunc("POST /api/scans/{id}/sent/refresh", s.handleRefreshSent)
+	mux.HandleFunc("GET /api/paperless", s.handlePaperlessStatus)
+	mux.HandleFunc("GET /api/paperless/metadata", s.handlePaperlessMetadata)
 
 	mux.HandleFunc("PUT /api/scans/{id}/pages/order", s.handleReorderPages)
 	mux.HandleFunc("GET /api/scans/{id}/pages/{page}/image", s.handlePageImage)

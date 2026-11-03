@@ -27,7 +27,7 @@ func newTestServer(t *testing.T, drv driver.Driver) (*Server, *storage.Store) {
 	return newTestServerAt(t, drv, storage.New(t.TempDir()))
 }
 
-func newTestServerAt(t *testing.T, drv driver.Driver, store *storage.Store) (*Server, *storage.Store) {
+func newTestServerAt(t *testing.T, drv driver.Driver, store *storage.Store, opts ...Option) (*Server, *storage.Store) {
 	t.Helper()
 	mgr := scanjobs.NewManager(drv, store)
 	mgr.Timings = scanjobs.Timings{Reconnect: 20 * time.Millisecond, ButtonPoll: 5 * time.Millisecond, Reply: 2 * time.Second}
@@ -35,7 +35,7 @@ func newTestServerAt(t *testing.T, drv driver.Driver, store *storage.Store) (*Se
 	done := make(chan struct{})
 	go func() { mgr.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
-	return NewServer(drv, mgr, store, nil, "test"), store
+	return NewServer(drv, mgr, store, nil, "test", opts...), store
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {

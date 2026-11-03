@@ -15,6 +15,10 @@ type Config struct {
 	// DriverName selects which registered driver.Driver to use (see
 	// internal/driver.Get).
 	DriverName string
+	// PaperlessURL and PaperlessToken enable "Send to Paperless"; both
+	// must be set.
+	PaperlessURL   string
+	PaperlessToken string
 }
 
 const (
@@ -40,5 +44,7 @@ func loadConfig(getenv func(string) string) Config {
 	if v := getenv("DOXIE_DRIVER"); v != "" {
 		cfg.DriverName = v
 	}
+	cfg.PaperlessURL = getenv("DOXIE_PAPERLESS_URL")
+	cfg.PaperlessToken = getenv("DOXIE_PAPERLESS_TOKEN")
 	return cfg
 }
