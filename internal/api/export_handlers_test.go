@@ -2,321 +2,88 @@ package api
 
 import (
 	"bytes"
-	"image/color"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/andiapps-dev/doxie-scanner/internal/driver"
-	"github.com/andiapps-dev/doxie-scanner/internal/storage"
+	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 )
 
-func seedPageJob(t *testing.T, store *storage.Store, id string) {
-	t.Helper()
-	seedJob(t, store, id, []storage.PageMeta{{Index: 1, File: "page-001.png", WidthPx: 12, HeightPx: 8}})
-	if err := store.SavePageFile(id, "page-001.png", testPNGBytes(t, 12, 8, color.NRGBA{R: 255, A: 255})); err != nil {
+func TestJobPDF_VisiblePagesWithOriginalsUntouched(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1",
+		seedPage{id: "001f"},
+		seedPage{id: "001b", hidden: true},
+		seedPage{id: "002f", edits: pageimage.Edits{Color: pageimage.ColorBW}})
+	original, _ := store.LoadPageFile("job1", "001f.jpg")
+
+	rec := do(srv, http.MethodGet, "/api/scans/job1/pdf", nil)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/pdf" {
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
+	}
+	pdf := rec.Body.Bytes()
+	if !bytes.Contains(pdf, []byte("/Count 2")) {
+		t.Error("the hidden page must be left out")
+	}
+	if !bytes.Contains(pdf, original) {
+		t.Error("an unedited page must be embedded byte for byte")
+	}
+	if !bytes.Contains(pdf, []byte("/FlateDecode")) {
+		t.Error("the black & white page should be re-encoded losslessly")
+	}
+	if !bytes.Contains(pdf, []byte("/MediaBox [0 0 14.40 21.60]")) {
+		t.Error("a 60x90 px page at 300 dpi is 0.2x0.3 in")
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="Scan job1.pdf"` {
+		t.Errorf("Content-Disposition %q", got)
+	}
+}
+
+func TestJobPDF_ExplicitSelectionIncludesHiddenPages(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f"}, seedPage{id: "001b", hidden: true})
+
+	rec := do(srv, http.MethodGet, "/api/scans/job1/pdf?pages=001b,001f,001b", nil)
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte("/Count 3")) {
+		t.Errorf("status %d: an explicit list is honored as given", rec.Code)
+	}
+}
+
+func TestJobPDF_Errors(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f"})
+	seedJob(t, store, "hidden-only", seedPage{id: "001f", hidden: true})
+	seedJob(t, store, "broken", seedPage{id: "001f"}, seedPage{id: "002f", edits: pageimage.Edits{Rotation: 90}})
+	if err := store.SavePageFile("broken", "002f.jpg", []byte("not a jpeg")); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestHandleExportPage_PNG(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1/pages/1/export?format=png", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
-		t.Errorf("Content-Type = %q", ct)
-	}
-}
-
-func TestHandleExportPage_DefaultFormatIsPNG(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1/pages/1/export", nil))
-	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/png" {
-		t.Fatalf("status=%d content-type=%q", rec.Code, rec.Header().Get("Content-Type"))
-	}
-}
-
-func TestHandleExportPage_JPEG(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1/pages/1/export?format=jpg", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "image/jpeg" {
-		t.Errorf("Content-Type = %q", ct)
-	}
-	if !bytes.HasPrefix(rec.Body.Bytes(), []byte{0xff, 0xd8}) {
-		t.Error("expected JPEG magic bytes")
-	}
-}
-
-func TestHandleExportPage_JPEGQualityParam(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{{Index: 1, File: "page-001.png", WidthPx: 200, HeightPx: 200}})
-	if err := store.SavePageFile("job-1", "page-001.png", noisyPNGBytes(t, 200, 200)); err != nil {
+	seedJob(t, store, "missing", seedPage{id: "001f"})
+	if err := store.DeletePageFile("missing", "001f.jpg"); err != nil {
 		t.Fatal(err)
 	}
 
-	get := func(url string) []byte {
-		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, url, nil))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("GET %s: status = %d, want 200, body=%s", url, rec.Code, rec.Body.String())
-		}
-		return rec.Body.Bytes()
+	cases := map[string]int{
+		"/api/scans/nope/pdf":           http.StatusNotFound,
+		"/api/scans/job1/pdf?pages=zzz": http.StatusBadRequest,
+		"/api/scans/hidden-only/pdf":    http.StatusBadRequest,
+		"/api/scans/broken/pdf":         http.StatusInternalServerError,
+		"/api/scans/missing/pdf":        http.StatusInternalServerError,
 	}
-
-	q100 := get("/api/scans/job-1/pages/1/export?format=jpg")
-	q90 := get("/api/scans/job-1/pages/1/export?format=jpg&quality=90")
-	if len(q90) >= len(q100) {
-		t.Errorf("expected quality=90 output (%d bytes) to be smaller than the default quality=100 output (%d bytes)", len(q90), len(q100))
-	}
-
-	// Explicitly requesting 100 should match the default (no quality
-	// param) exactly.
-	explicit100 := get("/api/scans/job-1/pages/1/export?format=jpg&quality=100")
-	if !bytes.Equal(q100, explicit100) {
-		t.Error("expected explicit quality=100 to match the default output exactly")
-	}
-
-	// Out-of-range/invalid values fall back to the 100 default rather
-	// than erroring, matching how an empty "format" already defaults to
-	// png elsewhere in this handler.
-	invalid := get("/api/scans/job-1/pages/1/export?format=jpg&quality=0")
-	if !bytes.Equal(q100, invalid) {
-		t.Error("expected an out-of-range quality to fall back to the default")
-	}
-}
-
-func TestHandleExportPage_PDF(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1/pages/1/export?format=pdf", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/pdf" {
-		t.Errorf("Content-Type = %q", ct)
-	}
-	if !bytes.HasPrefix(rec.Body.Bytes(), []byte("%PDF")) {
-		t.Error("expected PDF magic bytes")
-	}
-	// Single-page PDF export always embeds JPEG (no format choice here —
-	// the plain PNG download right next to it in the export menu already
-	// covers the lossless case; see export_handlers.go's "pdf" case).
-	if !bytes.Contains(rec.Body.Bytes(), []byte{0xff, 0xd8, 0xff}) {
-		t.Error("expected a JPEG SOI marker embedded in the single-page PDF")
-	}
-}
-
-func TestHandleExportPage_UnsupportedFormat(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1/pages/1/export?format=bmp", nil))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleExportPage_JobNotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/nope/pages/1/export", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-}
-
-func TestHandleCombine_Success(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-	seedPageJob(t, store, "job-2")
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[{"jobId":"job-1","page":1},{"jobId":"job-2","page":1}],"title":"combined-doc"}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-	if !bytes.HasPrefix(rec.Body.Bytes(), []byte("%PDF")) {
-		t.Error("expected PDF magic bytes")
-	}
-	if !bytes.Contains([]byte(rec.Header().Get("Content-Disposition")), []byte("combined-doc.pdf")) {
-		t.Errorf("Content-Disposition = %q", rec.Header().Get("Content-Disposition"))
-	}
-}
-
-func TestHandleCombine_DefaultImageFormatIsJPEG(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[{"jobId":"job-1","page":1}]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte{0xff, 0xd8, 0xff}) {
-		t.Error("expected a JPEG SOI marker when imageFormat is omitted")
-	}
-}
-
-func TestHandleCombine_ImageFormatJPEG(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[{"jobId":"job-1","page":1}],"imageFormat":"jpeg"}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte{0xff, 0xd8, 0xff}) {
-		t.Error("expected a JPEG SOI marker when imageFormat is \"jpeg\"")
-	}
-}
-
-func TestHandleCombine_ImageFormatPNG(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[{"jobId":"job-1","page":1}],"imageFormat":"png"}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-	// fpdf embeds PNG pages by decoding to a raw FlateDecode-compressed
-	// pixel stream, not the original PNG file bytes — so no literal PNG
-	// signature survives in the output (unlike JPEG, which fpdf embeds
-	// via DCTDecode using the original byte stream as-is). Absence of a
-	// JPEG SOI marker is the only reliable format signal available here.
-	if bytes.Contains(rec.Body.Bytes(), []byte{0xff, 0xd8, 0xff}) {
-		t.Error("did not expect a JPEG SOI marker when imageFormat is \"png\"")
-	}
-}
-
-func TestHandleCombine_InvalidImageFormat(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[{"jobId":"job-1","page":1}],"imageFormat":"bmp"}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleCombine_DefaultTitle(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedPageJob(t, store, "job-1")
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[{"jobId":"job-1","page":1}]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-	if !bytes.Contains([]byte(rec.Header().Get("Content-Disposition")), []byte("combined.pdf")) {
-		t.Errorf("Content-Disposition = %q", rec.Header().Get("Content-Disposition"))
-	}
-}
-
-func TestHandleCombine_MultiplePagesFromSameJob(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{
-		{Index: 1, File: "page-001.png"},
-		{Index: 2, File: "page-002.png"},
-	})
-	for _, f := range []string{"page-001.png", "page-002.png"} {
-		if err := store.SavePageFile("job-1", f, testPNGBytes(t, 10, 10, color.NRGBA{A: 255})); err != nil {
-			t.Fatal(err)
+	for path, want := range cases {
+		if rec := do(srv, http.MethodGet, path, nil); rec.Code != want {
+			t.Errorf("%s: status %d, want %d", path, rec.Code, want)
 		}
 	}
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[{"jobId":"job-1","page":2},{"jobId":"job-1","page":1}]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
 }
 
-func TestHandleCombine_EmptyPages(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleCombine_BadJSON(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", bytes.NewBufferString("not json")))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleCombine_JobNotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[{"jobId":"nope","page":1}]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-}
-
-func TestHandleCombine_PageNotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"pages":[{"jobId":"job-1","page":1}]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/export/combine", body))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+func TestPDFFilename(t *testing.T) {
+	for in, want := range map[string]string{
+		"Scan 2026-11-02 23:10": "Scan 2026-11-02 23-10.pdf",
+		"../../etc/passwd":      "..-..-etc-passwd.pdf",
+		"  ":                    "scan.pdf",
+		"Taxes/2026":            "Taxes-2026.pdf",
+	} {
+		if got := pdfFilename(in); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
 	}
 }

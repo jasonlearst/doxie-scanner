@@ -71,11 +71,24 @@ func TestRandHex_PanicsWhenCryptoRandFails(t *testing.T) {
 	randHex(4)
 }
 
-func TestPageFilenames(t *testing.T) {
-	if got := PageFilename(1); got != "page-001.png" {
-		t.Errorf("PageFilename(1): got %q", got)
+func TestPageIDsAndFilenames(t *testing.T) {
+	if got := PageID(3, "back"); got != "003b" {
+		t.Errorf("PageID(3, back): got %q", got)
 	}
-	if got := PageFilename(42); got != "page-042.png" {
-		t.Errorf("PageFilename(42): got %q", got)
+	if got := PageFilename(PageID(12, "front")); got != "012f.jpg" {
+		t.Errorf("PageFilename: got %q", got)
+	}
+}
+
+func TestJobMeta_VisibleAndFindPage(t *testing.T) {
+	j := JobMeta{Pages: []PageMeta{{ID: "001f"}, {ID: "001b", Hidden: true}, {ID: "002f"}}}
+	if got := j.VisiblePages(); len(got) != 2 || got[1].ID != "002f" {
+		t.Errorf("VisiblePages: got %+v", got)
+	}
+	if p, i, ok := j.FindPage("001b"); !ok || i != 1 || !p.Hidden {
+		t.Errorf("FindPage: got %+v at %d (%v)", p, i, ok)
+	}
+	if _, i, ok := j.FindPage("999f"); ok || i != -1 {
+		t.Error("FindPage should miss an unknown ID")
 	}
 }

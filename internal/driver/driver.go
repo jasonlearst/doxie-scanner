@@ -7,10 +7,7 @@
 // directly.
 package driver
 
-import (
-	"context"
-	"image"
-)
+import "context"
 
 // Info describes a driver for display/diagnostic purposes.
 type Info struct {
@@ -31,16 +28,23 @@ type ScanOptions struct {
 	Resolution int
 }
 
-// Page is the result of scanning one physical sheet.
+// Side is one side of a sheet exactly as the scanner delivered it.
+type Side struct {
+	// JPEG is a complete JPEG file.
+	JPEG []byte
+	// XDPI and YDPI are the sampling resolution. They differ when the
+	// scanner reads fewer lines per inch than columns (200 dpi is read at
+	// 300 across), so consumers must square up the pixels.
+	XDPI, YDPI int
+}
+
+// Page is the result of scanning one physical sheet. A driver never
+// drops a side: deciding what to do with a blank back is the caller's
+// call, not the hardware layer's.
 type Page struct {
-	Front image.Image
-	// Back is nil for a simplex scan, or for a duplex scan whose back
-	// side was detected as blank and dropped.
-	Back image.Image
-	// BackBlank records whether a duplex scan's back side was detected
-	// as blank (and therefore Back is nil), so callers can distinguish
-	// "no back side requested" from "back side requested but blank."
-	BackBlank bool
+	Front Side
+	// Back is nil only for a simplex scan.
+	Back *Side
 }
 
 // Session represents one open connection to a scanner, spanning

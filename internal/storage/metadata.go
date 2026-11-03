@@ -1,7 +1,7 @@
 // Package storage persists scan jobs to the filesystem under a single
 // required root directory (DOXIE_DATA_DIR in production — see main.go).
 // There is deliberately no database: one directory per job containing a
-// meta.json sidecar and a pages/ subdirectory of PNG files is enough for
+// meta.json sidecar and a pages/ subdirectory of the scanner's JPEGs is enough for
 // a tool with this usage pattern, and it keeps the whole thing
 // inspectable with plain filesystem tools.
 package storage
@@ -11,6 +11,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"time"
+
+	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 )
 
 // JobStatus is the lifecycle state of a scan job.
@@ -22,34 +24,65 @@ const (
 	StatusFailed    JobStatus = "failed"
 )
 
-// PageMeta describes one scanned page within a job. Each side of a
-// duplex sheet is its own independent PageMeta with its own sequential
-// Index — a duplex sheet produces two entries (e.g. indexes 1 and 2),
-// not one entry with a paired back image. There is nothing here that
-// distinguishes "front" from "back": once scanned, every page stands on
-// its own (rotate/crop/delete/export/reorder all act on one page at a
-// time, uniformly).
+// ScanSettings records what was asked for when a job started.
+type ScanSettings struct {
+	Resolution int    `json:"resolution"`
+	Sides      string `json:"sides"` // "single", "double" or "auto"
+	Color      string `json:"color"` // "color", "gray", "bw" or "auto"
+}
+
+// PageMeta describes one scanned side. Its File is the scanner's JPEG and
+// is never rewritten: rotation, crop, tone and color are kept in Edits and
+// applied whenever the page is rendered, so every change can be undone.
+// ID never changes either; a page's position is its place in
+// JobMeta.Pages, so reordering or deleting pages renames nothing.
 type PageMeta struct {
-	Index    int    `json:"index"`
-	File     string `json:"file"`
-	WidthPx  int    `json:"widthPx"`
-	HeightPx int    `json:"heightPx"`
+	ID       string          `json:"id"`
+	File     string          `json:"file"`
+	Sheet    int             `json:"sheet"`
+	Side     string          `json:"side"` // "front" or "back"
+	XDPI     int             `json:"xdpi"`
+	YDPI     int             `json:"ydpi"`
+	WidthPx  int             `json:"widthPx"` // decoded, square pixels at YDPI
+	HeightPx int             `json:"heightPx"`
+	Blank    bool            `json:"blank,omitempty"`
+	Hidden   bool            `json:"hidden,omitempty"`
+	Edits    pageimage.Edits `json:"edits"`
 }
 
 // JobMeta is the full persisted record for one scan job, stored as
 // meta.json inside that job's directory.
 type JobMeta struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Driver      string     `json:"driver"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	CompletedAt *time.Time `json:"completedAt,omitempty"`
-	Status      JobStatus  `json:"status"`
-	Duplex      bool       `json:"duplex"`
-	DPI         int        `json:"dpi"`
-	PageCount   int        `json:"pageCount"`
-	Pages       []PageMeta `json:"pages"`
-	Error       string     `json:"error,omitempty"`
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	Driver      string       `json:"driver"`
+	CreatedAt   time.Time    `json:"createdAt"`
+	CompletedAt *time.Time   `json:"completedAt,omitempty"`
+	Status      JobStatus    `json:"status"`
+	Settings    ScanSettings `json:"settings"`
+	Pages       []PageMeta   `json:"pages"`
+	Error       string       `json:"error,omitempty"`
+}
+
+// VisiblePages are the pages that export and upload by default.
+func (j JobMeta) VisiblePages() []PageMeta {
+	out := make([]PageMeta, 0, len(j.Pages))
+	for _, p := range j.Pages {
+		if !p.Hidden {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// FindPage looks a page up by ID, returning its position too.
+func (j JobMeta) FindPage(id string) (PageMeta, int, bool) {
+	for i, p := range j.Pages {
+		if p.ID == id {
+			return p, i, true
+		}
+	}
+	return PageMeta{}, -1, false
 }
 
 // NewJobID returns a human-sortable, collision-resistant job identifier:
@@ -83,7 +116,12 @@ func randHex(n int) string {
 	return hex.EncodeToString(buf)[:n]
 }
 
-// PageFilename returns the on-disk filename for a page.
-func PageFilename(index int) string {
-	return fmt.Sprintf("page-%03d.png", index)
+// PageID names the side of a sheet, e.g. "003b" for the back of sheet 3.
+func PageID(sheet int, side string) string {
+	return fmt.Sprintf("%03d%c", sheet, side[0])
+}
+
+// PageFilename is where a page's original scanner JPEG is stored.
+func PageFilename(id string) string {
+	return id + ".jpg"
 }

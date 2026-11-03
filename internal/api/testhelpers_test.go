@@ -2,89 +2,84 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"image"
-	"image/color"
-	"image/png"
-	"math/rand"
+	"image/draw"
+	"image/jpeg"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
+	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
 
-// newTestServer builds a Server wired against a real storage.Store
-// backed by t.TempDir() (no reason to fake the filesystem too) and a
-// scanjobs.Manager wrapping drv.
+// newTestServer builds a Server against a real storage.Store in a temp
+// directory and a scanjobs.Manager wrapping drv.
 func newTestServer(t *testing.T, drv driver.Driver) (*Server, *storage.Store) {
 	t.Helper()
 	store := storage.New(t.TempDir())
-	mgr := scanjobs.NewManager(drv, store)
-	return NewServer(drv, mgr, store, nil, "test", "eng"), store
+	return NewServer(drv, scanjobs.NewManager(drv, store), store, nil, "test"), store
 }
 
-func testImage(w, h int, c color.NRGBA) *image.NRGBA {
+func do(srv *Server, method, path string, body any) *httptest.ResponseRecorder {
+	var r io.Reader
+	switch b := body.(type) {
+	case nil:
+	case string:
+		r = strings.NewReader(b)
+	default:
+		data, _ := json.Marshal(b)
+		r = bytes.NewReader(data)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(method, path, r))
+	return rec
+}
+
+func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
+	t.Helper()
+	var v T
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	return v
+}
+
+// textImage is white with black bars, sized like a small scan.
+func textImage(w, h int) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			img.Set(x, y, c)
-		}
+	draw.Draw(img, img.Bounds(), image.White, image.Point{}, draw.Src)
+	for y := 5; y < h; y += 15 {
+		draw.Draw(img, image.Rect(5, y, w-5, y+4), image.Black, image.Point{}, draw.Src)
 	}
 	return img
 }
 
-func testPNGBytes(t *testing.T, w, h int, c color.NRGBA) []byte {
+func jpegBytes(t *testing.T, img image.Image) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, testImage(w, h, c)); err != nil {
-		t.Fatalf("encode test PNG: %v", err)
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
 	}
 	return buf.Bytes()
 }
 
-// noisyPNGBytes builds a smooth gradient with per-pixel jitter (seeded
-// math/rand, so this stays deterministic) rather than a flat color — a
-// flat color's JPEG encoding barely changes size across quality levels
-// (there's no AC coefficient variation for quality to act on), which
-// would make a quality-comparison test meaningless or flaky. See the
-// equivalent helper (and its longer explanation) in
-// internal/pdfexport/pdfexport_test.go.
-func noisyPNGBytes(t *testing.T, w, h int) []byte {
-	t.Helper()
-	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	rng := rand.New(rand.NewSource(42))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			jitter := rng.Intn(31) - 15
-			clamp := func(v int) uint8 {
-				if v < 0 {
-					return 0
-				}
-				if v > 255 {
-					return 255
-				}
-				return uint8(v)
-			}
-			img.Set(x, y, color.NRGBA{
-				R: clamp(255*x/w + jitter),
-				G: clamp(255*y/h + jitter),
-				B: clamp(200 + jitter),
-				A: 255,
-			})
-		}
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		t.Fatalf("encode noisy test PNG: %v", err)
-	}
-	return buf.Bytes()
+// seedPage describes one page to seed; the original is a 60x90 JPEG.
+type seedPage struct {
+	id     string
+	hidden bool
+	edits  pageimage.Edits
 }
 
-// seedJob creates a job directly in the store (bypassing any real scan)
-// with the given pages, useful for testing every handler except
-// StartScan itself.
-func seedJob(t *testing.T, store *storage.Store, id string, pages []storage.PageMeta) storage.JobMeta {
+// seedJob writes a completed job with real JPEG originals straight into
+// the store, bypassing the scanner.
+func seedJob(t *testing.T, store *storage.Store, id string, pages ...seedPage) storage.JobMeta {
 	t.Helper()
 	meta := storage.JobMeta{
 		ID:        id,
@@ -92,11 +87,45 @@ func seedJob(t *testing.T, store *storage.Store, id string, pages []storage.Page
 		Driver:    "fake-driver",
 		CreatedAt: time.Now(),
 		Status:    storage.StatusCompleted,
-		PageCount: len(pages),
-		Pages:     pages,
+		Settings:  scanjobs.DefaultSettings,
+		Pages:     []storage.PageMeta{},
 	}
 	if err := store.CreateJob(meta); err != nil {
-		t.Fatalf("seedJob: CreateJob: %v", err)
+		t.Fatal(err)
+	}
+	for _, p := range pages {
+		page := storage.PageMeta{
+			ID: p.id, File: storage.PageFilename(p.id), Side: "front",
+			XDPI: 300, YDPI: 300, WidthPx: 60, HeightPx: 90,
+			Hidden: p.hidden, Edits: p.edits,
+		}
+		if err := store.SavePageFile(id, page.File, jpegBytes(t, textImage(60, 90))); err != nil {
+			t.Fatal(err)
+		}
+		meta.Pages = append(meta.Pages, page)
+	}
+	if err := store.SaveMeta(meta); err != nil {
+		t.Fatal(err)
 	}
 	return meta
+}
+
+// runningServer starts a scan whose session blocks until release is
+// closed, so tests can observe a job that's still scanning.
+func runningServer(t *testing.T) (*Server, *storage.Store, string, chan struct{}) {
+	t.Helper()
+	release := make(chan struct{})
+	srv, store := newTestServer(t, &fakeDriver{session: &fakeSession{block: release}})
+	rec := do(srv, http.MethodPost, "/api/scans", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("start scan: %d %s", rec.Code, rec.Body)
+	}
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	return srv, store, decode[startScanResponse](t, rec).JobID, release
 }

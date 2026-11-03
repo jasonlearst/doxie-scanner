@@ -19,6 +19,8 @@ type fakeSession struct {
 
 	closeErr error
 	closed   bool
+
+	opts []driver.ScanOptions
 }
 
 func (s *fakeSession) HasNextPage(ctx context.Context) (bool, error) {
@@ -30,6 +32,7 @@ func (s *fakeSession) HasNextPage(ctx context.Context) (bool, error) {
 
 func (s *fakeSession) ScanPage(ctx context.Context, opts driver.ScanOptions) (driver.Page, error) {
 	s.idx++
+	s.opts = append(s.opts, opts)
 	if s.scanErr != nil && s.idx == s.scanErrAt {
 		return driver.Page{}, s.scanErr
 	}

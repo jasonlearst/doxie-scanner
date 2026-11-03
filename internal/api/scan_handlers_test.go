@@ -1,636 +1,221 @@
 package api
 
 import (
-	"bytes"
-	"encoding/json"
-	"image/color"
 	"net/http"
-	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/andiapps-dev/doxie-scanner/internal/driver"
+	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
 
-func waitForJobDone(t *testing.T, srv *Server) {
+func waitDone(t *testing.T, srv *Server) {
 	t.Helper()
-	// Generous margin: see the identical comment on scanjobs' own
-	// waitForJobDone — a tight deadline here can flake on a
-	// shared/throttled CI runner even though the fakes finish almost
-	// instantly in practice.
 	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if cur := srv.jobs.CurrentJob(); cur == nil || cur.Status != storage.StatusRunning {
-			return
+	for srv.jobs.Scanning() {
+		if time.Now().After(deadline) {
+			t.Fatal("scan never finished")
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("timed out waiting for job to finish")
 }
 
-func TestHandleStartScan_Success(t *testing.T) {
-	sess := &fakeSession{pages: []driver.Page{{Front: testImage(10, 10, color.NRGBA{A: 255})}}}
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}, session: sess}
-	srv, store := newTestServer(t, drv)
+func TestScanOptions(t *testing.T) {
+	srv, _ := newTestServer(t, &fakeDriver{})
+	resp := decode[scanOptionsResponse](t, do(srv, http.MethodGet, "/api/scan-options", nil))
+	if resp.Defaults != scanjobs.DefaultSettings || len(resp.Resolutions) != 3 || resp.Sides[0] != "auto" || resp.Colors[0] != "auto" {
+		t.Errorf("got %+v", resp)
+	}
+}
 
-	body := bytes.NewBufferString(`{"duplex":true}`)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/scans", body))
-
+func TestStartScan_EmptyBodyUsesDefaults(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{session: &fakeSession{}})
+	rec := do(srv, http.MethodPost, "/api/scans", nil)
 	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	var resp startScanResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.JobID == "" {
-		t.Fatal("expected a job ID")
-	}
-	waitForJobDone(t, srv)
-
-	meta, err := store.LoadMeta(resp.JobID)
-	if err != nil {
-		t.Fatalf("LoadMeta: %v", err)
-	}
-	if meta.Status != storage.StatusCompleted || meta.PageCount != 1 {
-		t.Errorf("unexpected final meta: %+v", meta)
+	id := decode[startScanResponse](t, rec).JobID
+	waitDone(t, srv)
+	meta, err := store.LoadMeta(id)
+	if err != nil || meta.Settings != scanjobs.DefaultSettings {
+		t.Errorf("settings %+v (%v)", meta.Settings, err)
 	}
 }
 
-func TestHandleStartScan_EmptyBodyDefaultsSimplex(t *testing.T) {
-	sess := &fakeSession{}
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}, session: sess}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/scans", nil))
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202, body=%s", rec.Code, rec.Body.String())
-	}
-	// Wait for the background goroutine to finish before the test (and
-	// its t.TempDir() cleanup) returns, so cleanup can't race the
-	// goroutine's own filesystem writes.
-	waitForJobDone(t, srv)
-}
-
-func TestHandleStartScan_BadJSON(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}, session: &fakeSession{}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/scans", bytes.NewBufferString("not json")))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+func TestStartScan_PartialSettingsKeepTheRestDefault(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{session: &fakeSession{}})
+	id := decode[startScanResponse](t, do(srv, http.MethodPost, "/api/scans", map[string]any{"resolution": 600, "color": "gray"})).JobID
+	waitDone(t, srv)
+	meta, _ := store.LoadMeta(id)
+	if meta.Settings != (storage.ScanSettings{Resolution: 600, Sides: "auto", Color: "gray"}) {
+		t.Errorf("settings %+v", meta.Settings)
 	}
 }
 
-func TestHandleStartScan_AlreadyRunning(t *testing.T) {
-	sess := &fakeSession{block: make(chan struct{})}
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}, session: sess}
-	srv, _ := newTestServer(t, drv)
-
-	if _, err := srv.jobs.StartScan(false); err != nil {
-		t.Fatalf("first StartScan: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/scans", nil))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409, body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestHandleListScans(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
-	seedJob(t, store, "job-2", []storage.PageMeta{{Index: 1, File: "page-001.png"}})
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	var jobs []jobSummary
-	if err := json.Unmarshal(rec.Body.Bytes(), &jobs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(jobs) != 2 {
-		t.Fatalf("expected 2 jobs, got %d", len(jobs))
-	}
-}
-
-func TestHandleListScans_StoreError(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: permission-denied simulation doesn't apply")
-	}
-	// Make the jobs dir exist but unreadable, so ListJobs errors.
-	seedJob(t, store, "job-1", nil)
-	if err := os.Chmod(store.Root()+"/jobs", 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	defer os.Chmod(store.Root()+"/jobs", 0o755)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans", nil))
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", rec.Code)
-	}
-}
-
-func TestHandleGetScan(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{{Index: 1, File: "page-001.png"}})
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-	var resp jobDetailResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.ID != "job-1" || len(resp.Pages) != 1 {
-		t.Errorf("unexpected response: %+v", resp)
-	}
-	if resp.PagesScanned != nil {
-		t.Errorf("expected no live progress overlay for a non-running job")
-	}
-}
-
-func TestHandleGetScan_LiveProgressOverlay(t *testing.T) {
-	sess := &fakeSession{block: make(chan struct{})}
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}, session: sess}
-	srv, _ := newTestServer(t, drv)
-
-	id, err := srv.jobs.StartScan(false)
-	if err != nil {
-		t.Fatalf("StartScan: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/"+id, nil))
-	var resp jobDetailResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.PagesScanned == nil {
-		t.Error("expected a live progress overlay for the running job")
-	}
-}
-
-func TestHandleGetScan_NotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/nope", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-}
-
-func TestHandleRenameScan(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"name":"Tax documents"}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/job-1", body))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-
-	meta, err := store.LoadMeta("job-1")
-	if err != nil {
-		t.Fatalf("LoadMeta: %v", err)
-	}
-	if meta.Name != "Tax documents" {
-		t.Errorf("Name = %q, want %q", meta.Name, "Tax documents")
-	}
-}
-
-func TestHandleRenameScan_EmptyName(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"name":"   "}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/job-1", body))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleRenameScan_BadJSON(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/job-1", bytes.NewBufferString("not json")))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleRenameScan_NotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"name":"x"}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/nope", body))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-}
-
-func TestHandleDeleteScan(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/scans/job-1", nil))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rec.Code)
-	}
-	if _, err := store.LoadMeta("job-1"); err == nil {
-		t.Error("expected job to be deleted")
-	}
-}
-
-func TestHandleDeleteScan_NotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/scans/nope", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-}
-
-func TestHandleReorderPages(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{
-		{Index: 1, File: "page-001.png"},
-		{Index: 2, File: "page-002.png"},
-		{Index: 3, File: "page-003.png"},
-	})
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"order":[3,1,2]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/job-1/pages/order", body))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
-	}
-
-	meta, err := store.LoadMeta("job-1")
-	if err != nil {
-		t.Fatalf("LoadMeta: %v", err)
-	}
-	got := []int{meta.Pages[0].Index, meta.Pages[1].Index, meta.Pages[2].Index}
-	want := []int{3, 1, 2}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("Pages order = %v, want %v", got, want)
+func TestStartScan_Rejections(t *testing.T) {
+	srv, _ := newTestServer(t, &fakeDriver{session: &fakeSession{}})
+	for _, body := range []any{"{not json", map[string]any{"resolution": 150}, map[string]any{"sides": "both"}} {
+		if rec := do(srv, http.MethodPost, "/api/scans", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%v: status %d", body, rec.Code)
 		}
 	}
 }
 
-func TestHandleReorderPages_WrongLength(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{
-		{Index: 1, File: "page-001.png"},
-		{Index: 2, File: "page-002.png"},
-	})
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"order":[1]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/job-1/pages/order", body))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+func TestStartScan_ConflictWhileRunning(t *testing.T) {
+	srv, _, id, _ := runningServer(t)
+	rec := do(srv, http.MethodPost, "/api/scans", nil)
+	if rec.Code != http.StatusConflict || decode[startScanResponse](t, rec).JobID != id {
+		t.Errorf("status %d body %s", rec.Code, rec.Body)
 	}
 }
 
-func TestHandleReorderPages_NotAPermutation(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{
-		{Index: 1, File: "page-001.png"},
-		{Index: 2, File: "page-002.png"},
-	})
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"order":[1,1]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/job-1/pages/order", body))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleReorderPages_UnknownIndex(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{
-		{Index: 1, File: "page-001.png"},
-		{Index: 2, File: "page-002.png"},
-	})
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"order":[1,99]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/job-1/pages/order", body))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleReorderPages_BadJSON(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/job-1/pages/order", bytes.NewBufferString("not json")))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleReorderPages_JobNotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"order":[]}`)
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/scans/nope/pages/order", body))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-}
-
-func TestHandleGetPage(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{
-		{Index: 1, File: "page-001.png"},
-		{Index: 2, File: "page-002.png"},
-	})
-	page1Bytes := testPNGBytes(t, 10, 10, color.NRGBA{R: 255, A: 255})
-	page2Bytes := testPNGBytes(t, 10, 10, color.NRGBA{B: 255, A: 255})
-	if err := store.SavePageFile("job-1", "page-001.png", page1Bytes); err != nil {
+func TestStartScan_StorageFailure(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(root, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SavePageFile("job-1", "page-002.png", page2Bytes); err != nil {
+	drv := &fakeDriver{session: &fakeSession{}}
+	store := storage.New(root)
+	srv := NewServer(drv, scanjobs.NewManager(drv, store), store, nil, "test")
+	if rec := do(srv, http.MethodPost, "/api/scans", nil); rec.Code != http.StatusInternalServerError {
+		t.Errorf("status %d", rec.Code)
+	}
+}
+
+func TestListScans(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f", hidden: true}, seedPage{id: "001b"}, seedPage{id: "002f"})
+	seedJob(t, store, "empty")
+
+	list := decode[[]jobSummary](t, do(srv, http.MethodGet, "/api/scans", nil))
+	if len(list) != 2 {
+		t.Fatalf("got %d jobs", len(list))
+	}
+	for _, j := range list {
+		switch j.ID {
+		case "job1":
+			if j.PageCount != 2 || j.CoverPage != "001b" || j.CoverKey == "" {
+				t.Errorf("hidden pages don't count or make the cover: %+v", j)
+			}
+		case "empty":
+			if j.PageCount != 0 || j.CoverPage != "" {
+				t.Errorf("empty job: %+v", j)
+			}
+		}
+	}
+}
+
+func TestListScans_StorageFailure(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	if err := os.WriteFile(filepath.Join(store.Root(), "jobs"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1/pages/1", nil))
-	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), page1Bytes) {
-		t.Fatalf("page 1 mismatch, status=%d", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1/pages/2", nil))
-	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), page2Bytes) {
-		t.Fatalf("page 2 mismatch, status=%d", rec.Code)
+	if rec := do(srv, http.MethodGet, "/api/scans", nil); rec.Code != http.StatusInternalServerError {
+		t.Errorf("status %d", rec.Code)
 	}
 }
 
-func TestHandleGetPage_InvalidPageNumber(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
+func TestGetScan(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f"})
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1/pages/abc", nil))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+	got := decode[jobDetailResponse](t, do(srv, http.MethodGet, "/api/scans/job1", nil))
+	if len(got.Pages) != 1 || got.Pages[0].ThumbKey == "" || got.Pages[0].PreviewKey == got.Pages[0].ThumbKey || got.PagesScanned != nil {
+		t.Errorf("got %+v", got)
+	}
+	if rec := do(srv, http.MethodGet, "/api/scans/nope", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown job: %d", rec.Code)
 	}
 }
 
-func TestHandleGetPage_JobNotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/nope/pages/1", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+func TestGetScan_ReportsLiveProgress(t *testing.T) {
+	srv, _, id, _ := runningServer(t)
+	got := decode[jobDetailResponse](t, do(srv, http.MethodGet, "/api/scans/"+id, nil))
+	if got.PagesScanned == nil || *got.PagesScanned != 0 {
+		t.Errorf("a running job should report pagesScanned, got %+v", got.PagesScanned)
 	}
 }
 
-func TestHandleGetPage_PageNotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
+func TestRenameScan(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1")
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scans/job-1/pages/1", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+	if rec := do(srv, http.MethodPatch, "/api/scans/job1", map[string]string{"name": "  Taxes  "}); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if meta, _ := store.LoadMeta("job1"); meta.Name != "Taxes" {
+		t.Errorf("name %q", meta.Name)
+	}
+	for body, want := range map[any]int{"{": 400, `{"name":"  "}`: 400} {
+		if rec := do(srv, http.MethodPatch, "/api/scans/job1", body); rec.Code != want {
+			t.Errorf("%v: status %d", body, rec.Code)
+		}
+	}
+	if rec := do(srv, http.MethodPatch, "/api/scans/nope", map[string]string{"name": "x"}); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown job: %d", rec.Code)
 	}
 }
 
-func TestHandleDeletePage(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{
-		{Index: 1, File: "page-001.png"},
-		{Index: 2, File: "page-002.png"},
-	})
-	page2Bytes := testPNGBytes(t, 5, 5, color.NRGBA{B: 255, A: 255})
-	if err := store.SavePageFile("job-1", "page-001.png", testPNGBytes(t, 5, 5, color.NRGBA{R: 255, A: 255})); err != nil {
+func TestMutateJob_SaveFailure(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1")
+	metaPath := filepath.Join(store.Root(), "jobs", "job1", "meta.json")
+	if err := os.Chmod(metaPath, 0o444); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SavePageFile("job-1", "page-002.png", page2Bytes); err != nil {
+	t.Cleanup(func() { os.Chmod(metaPath, 0o644) })
+	if rec := do(srv, http.MethodPatch, "/api/scans/job1", map[string]string{"name": "x"}); rec.Code != http.StatusInternalServerError {
+		t.Errorf("status %d", rec.Code)
+	}
+}
+
+func TestRunningJobIsLocked(t *testing.T) {
+	srv, _, id, _ := runningServer(t)
+	for _, req := range []struct{ method, path string }{
+		{http.MethodPatch, "/api/scans/" + id},
+		{http.MethodDelete, "/api/scans/" + id},
+		{http.MethodPatch, "/api/scans/" + id + "/pages/001f"},
+	} {
+		if rec := do(srv, req.method, req.path, map[string]string{"name": "x"}); rec.Code != http.StatusConflict {
+			t.Errorf("%s %s: status %d", req.method, req.path, rec.Code)
+		}
+	}
+}
+
+func TestDeleteScan(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f"})
+
+	if rec := do(srv, http.MethodDelete, "/api/scans/job1", nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if _, err := store.LoadMeta("job1"); err == nil {
+		t.Error("job should be gone")
+	}
+	if rec := do(srv, http.MethodDelete, "/api/scans/job1", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("second delete: %d", rec.Code)
+	}
+}
+
+func TestDeleteScan_StorageFailure(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1")
+	jobsDir := filepath.Join(store.Root(), "jobs")
+	if err := os.Chmod(jobsDir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/scans/job-1/pages/1", nil))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rec.Code)
-	}
-
-	// Deleting page 1 should renumber the former page 2 down to 1 — no
-	// gap left behind.
-	meta, err := store.LoadMeta("job-1")
-	if err != nil {
-		t.Fatalf("LoadMeta: %v", err)
-	}
-	if len(meta.Pages) != 1 || meta.Pages[0].Index != 1 || meta.Pages[0].File != "page-001.png" || meta.PageCount != 1 {
-		t.Errorf("unexpected pages after delete: %+v", meta.Pages)
-	}
-	data, err := store.LoadPageFile("job-1", "page-001.png")
-	if err != nil {
-		t.Fatalf("LoadPageFile: %v", err)
-	}
-	if !bytes.Equal(data, page2Bytes) {
-		t.Error("expected the renumbered page-001.png to hold the former page 2's content")
-	}
-	if _, err := store.LoadPageFile("job-1", "page-002.png"); err == nil {
-		t.Error("expected the old page-002.png to no longer exist")
+	t.Cleanup(func() { os.Chmod(jobsDir, 0o755) })
+	if rec := do(srv, http.MethodDelete, "/api/scans/job1", nil); rec.Code != http.StatusInternalServerError {
+		t.Errorf("status %d", rec.Code)
 	}
 }
 
-func TestHandleDeletePage_RenumbersAroundAGapSafely(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{
-		{Index: 1, File: "page-001.png"},
-		{Index: 2, File: "page-002.png"},
-		{Index: 3, File: "page-003.png"},
-		{Index: 4, File: "page-004.png"},
-	})
-	contents := map[string][]byte{
-		"page-001.png": testPNGBytes(t, 5, 5, color.NRGBA{R: 255, A: 255}),
-		"page-002.png": testPNGBytes(t, 5, 5, color.NRGBA{G: 255, A: 255}),
-		"page-003.png": testPNGBytes(t, 5, 5, color.NRGBA{B: 255, A: 255}),
-		"page-004.png": testPNGBytes(t, 5, 5, color.NRGBA{R: 255, G: 255, A: 255}),
-	}
-	for name, data := range contents {
-		if err := store.SavePageFile("job-1", name, data); err != nil {
-			t.Fatal(err)
+func TestErrorCode(t *testing.T) {
+	for status, want := range map[int]string{404: "not_found", 400: "bad_request", 500: "internal_error"} {
+		if got := errorCode(status); got != want {
+			t.Errorf("%d: got %q", status, got)
 		}
-	}
-
-	// Delete page 2: pages 3 and 4 must renumber to 2 and 3. A naive
-	// same-name overwrite (renaming page-003.png straight to page-002.png)
-	// would be fine here since nothing else targets page-002.png at that
-	// moment, but this is exactly the scenario that would corrupt data
-	// with an unsafe rename order after a drag-reorder shuffles the list.
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/scans/job-1/pages/2", nil))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204, body=%s", rec.Code, rec.Body.String())
-	}
-
-	meta, err := store.LoadMeta("job-1")
-	if err != nil {
-		t.Fatalf("LoadMeta: %v", err)
-	}
-	if len(meta.Pages) != 3 {
-		t.Fatalf("expected 3 pages, got %+v", meta.Pages)
-	}
-	wantIndexes := []int{1, 2, 3}
-	wantContent := [][]byte{contents["page-001.png"], contents["page-003.png"], contents["page-004.png"]}
-	for i, p := range meta.Pages {
-		if p.Index != wantIndexes[i] {
-			t.Errorf("page %d: index = %d, want %d", i, p.Index, wantIndexes[i])
-		}
-		data, err := store.LoadPageFile("job-1", p.File)
-		if err != nil {
-			t.Fatalf("LoadPageFile(%s): %v", p.File, err)
-		}
-		if !bytes.Equal(data, wantContent[i]) {
-			t.Errorf("page %d (%s): content doesn't match the expected original image — renumbering likely clobbered a file", i, p.File)
-		}
-	}
-}
-
-func TestHandleDeletePage_RenumbersOutOfOrderPagesSafely(t *testing.T) {
-	// After a drag-reorder, meta.Pages can be in a different order than
-	// their File names' numeric order (e.g. display order [3,1,2] while
-	// files are still page-003.png/page-001.png/page-002.png). Renumbering
-	// must handle this without one rename clobbering another page's
-	// not-yet-processed file.
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", []storage.PageMeta{
-		{Index: 3, File: "page-003.png"},
-		{Index: 1, File: "page-001.png"},
-		{Index: 2, File: "page-002.png"},
-		{Index: 4, File: "page-004.png"},
-	})
-	contents := map[string][]byte{
-		"page-003.png": testPNGBytes(t, 5, 5, color.NRGBA{R: 255, A: 255}),
-		"page-001.png": testPNGBytes(t, 5, 5, color.NRGBA{G: 255, A: 255}),
-		"page-002.png": testPNGBytes(t, 5, 5, color.NRGBA{B: 255, A: 255}),
-		"page-004.png": testPNGBytes(t, 5, 5, color.NRGBA{R: 255, G: 255, A: 255}),
-	}
-	for name, data := range contents {
-		if err := store.SavePageFile("job-1", name, data); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Delete the last displayed page (original index 4); the first three
-	// displayed pages (originally indexed 3,1,2) must renumber to 1,2,3
-	// in that display order, without any rename clobbering another page.
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/scans/job-1/pages/4", nil))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204, body=%s", rec.Code, rec.Body.String())
-	}
-
-	meta, err := store.LoadMeta("job-1")
-	if err != nil {
-		t.Fatalf("LoadMeta: %v", err)
-	}
-	if len(meta.Pages) != 3 {
-		t.Fatalf("expected 3 pages, got %+v", meta.Pages)
-	}
-	wantContent := [][]byte{contents["page-003.png"], contents["page-001.png"], contents["page-002.png"]}
-	for i, p := range meta.Pages {
-		if p.Index != i+1 {
-			t.Errorf("page %d: index = %d, want %d", i, p.Index, i+1)
-		}
-		data, err := store.LoadPageFile("job-1", p.File)
-		if err != nil {
-			t.Fatalf("LoadPageFile(%s): %v", p.File, err)
-		}
-		if !bytes.Equal(data, wantContent[i]) {
-			t.Errorf("page %d (%s): content mismatch — renumbering likely clobbered a file", i, p.File)
-		}
-	}
-}
-
-func TestHandleDeletePage_NotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/scans/job-1/pages/1", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-}
-
-func TestHandleDeletePage_InvalidPageNumber(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, store := newTestServer(t, drv)
-	seedJob(t, store, "job-1", nil)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/scans/job-1/pages/0", nil))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleDeletePage_JobNotFound(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/scans/nope/pages/1", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }

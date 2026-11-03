@@ -18,6 +18,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 
 type scannerStatusResponse struct {
 	Connected bool      `json:"connected"`
+	Busy      bool      `json:"busy"`
 	VID       string    `json:"vid"`
 	PID       string    `json:"pid"`
 	Driver    string    `json:"driver"`
@@ -36,6 +37,12 @@ func (s *Server) handleScannerStatus(w http.ResponseWriter, r *http.Request) {
 		Driver: info.Name,
 	}
 
+	if s.jobs.Scanning() {
+		// The scan holds the USB interface; probing it would only fail.
+		resp.Connected, resp.Busy = true, true
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
 	if err := s.drv.Detect(r.Context()); err != nil {
 		_, code, message := classifyDeviceError(err)
 		resp.Error = &apiError{Code: code, Message: message}

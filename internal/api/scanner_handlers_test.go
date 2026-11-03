@@ -116,3 +116,13 @@ func TestHandleScannerStatus_GenericScsiError(t *testing.T) {
 		t.Errorf("expected scsi_error, got %+v", resp.Error)
 	}
 }
+
+func TestHandleScannerStatus_BusyWhileScanningSkipsProbe(t *testing.T) {
+	srv, _, _, _ := runningServer(t)
+	srv.drv.(*fakeDriver).detectErr = errors.New("interface held by the scan")
+
+	resp := decode[scannerStatusResponse](t, do(srv, http.MethodGet, "/api/scanner/status", nil))
+	if !resp.Connected || !resp.Busy || resp.Error != nil {
+		t.Errorf("a scanner held by our own scan is connected and busy, got %+v", resp)
+	}
+}

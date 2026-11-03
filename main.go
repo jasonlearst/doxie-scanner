@@ -1,6 +1,6 @@
 // Command doxie-scanner runs a standalone HTTP server for driving a Doxie
-// Pro DX400 scanner over raw SCSI-over-USB-bulk, with a web UI for
-// scanning, reviewing, editing, and exporting pages. See README.md for
+// Pro DX400 scanner over USB, with a web UI for scanning, reviewing,
+// editing, and exporting pages. See README.md for
 // setup (USB passthrough, the required persistent data volume) and the
 // full HTTP API reference.
 package main
@@ -49,7 +49,7 @@ func main() {
 	}
 
 	mgr := scanjobs.NewManager(drv, store)
-	srv := api.NewServer(drv, mgr, store, web.FS(), version, cfg.OCRLang)
+	srv := api.NewServer(drv, mgr, store, web.FS(), version)
 
 	log.Printf("doxie-scanner %s listening on %s (driver=%s)", version, cfg.ListenAddr, cfg.DriverName)
 	log.Fatal(http.ListenAndServe(cfg.ListenAddr, srv))

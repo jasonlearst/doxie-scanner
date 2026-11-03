@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Store persists scan jobs under a single root directory. Every method
@@ -133,31 +134,50 @@ func (s *Store) LoadPageFile(jobID, filename string) ([]byte, error) {
 	return data, nil
 }
 
-// PageFilePath returns the absolute on-disk path of one page image file
-// for a job, for callers that need to hand a real path to an external
-// tool (e.g. internal/ocr, which shells out to unpaper/tesseract)
-// instead of reading the file's bytes into memory themselves.
-func (s *Store) PageFilePath(jobID, filename string) string {
-	return filepath.Join(s.pagesDir(jobID), filename)
-}
-
-// RenamePageFile renames a page image file within a job (e.g. when pages
-// are renumbered after a deletion). A cheap metadata-only operation
-// since it never touches the file's contents.
-func (s *Store) RenamePageFile(jobID, oldFilename, newFilename string) error {
-	oldPath := filepath.Join(s.pagesDir(jobID), oldFilename)
-	newPath := filepath.Join(s.pagesDir(jobID), newFilename)
-	if err := os.Rename(oldPath, newPath); err != nil {
-		return fmt.Errorf("storage: rename page file %q to %q for job %q: %w", oldFilename, newFilename, jobID, err)
-	}
-	return nil
-}
-
-// DeletePageFile removes one page image file for a job.
+// DeletePageFile removes one page's original and every cached rendering
+// of it.
 func (s *Store) DeletePageFile(jobID, filename string) error {
 	path := filepath.Join(s.pagesDir(jobID), filename)
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("storage: delete page file %q for job %q: %w", filename, jobID, err)
+	}
+	return s.DeleteRenders(jobID, strings.TrimSuffix(filename, filepath.Ext(filename)))
+}
+
+func (s *Store) rendersDir(jobID string) string {
+	return filepath.Join(s.pagesDir(jobID), ".render")
+}
+
+func (s *Store) renderPath(jobID, pageID, key string) string {
+	return filepath.Join(s.rendersDir(jobID), pageID+"-"+key+".jpg")
+}
+
+// LoadRender returns a cached rendering of a page; key identifies the
+// edits and size it was made with.
+func (s *Store) LoadRender(jobID, pageID, key string) ([]byte, bool) {
+	data, err := os.ReadFile(s.renderPath(jobID, pageID, key))
+	return data, err == nil
+}
+
+// SaveRender caches a rendering of a page.
+func (s *Store) SaveRender(jobID, pageID, key string, data []byte) error {
+	if err := os.MkdirAll(s.rendersDir(jobID), 0o755); err != nil {
+		return fmt.Errorf("storage: create render cache for job %q: %w", jobID, err)
+	}
+	if err := os.WriteFile(s.renderPath(jobID, pageID, key), data, 0o644); err != nil {
+		return fmt.Errorf("storage: cache rendering of page %q in job %q: %w", pageID, jobID, err)
+	}
+	return nil
+}
+
+// DeleteRenders drops every cached rendering of a page, e.g. after its
+// edits change.
+func (s *Store) DeleteRenders(jobID, pageID string) error {
+	matches, _ := filepath.Glob(filepath.Join(s.rendersDir(jobID), pageID+"-*.jpg"))
+	for _, m := range matches {
+		if err := os.Remove(m); err != nil {
+			return fmt.Errorf("storage: drop cached rendering %q: %w", filepath.Base(m), err)
+		}
 	}
 	return nil
 }

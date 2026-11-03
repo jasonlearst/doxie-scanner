@@ -71,21 +71,13 @@ func (s *session) ScanPage(ctx context.Context, opts driver.ScanOptions) (driver
 		return driver.Page{}, err
 	}
 
-	front, err := decodeSide(sides[0], w)
-	if err != nil {
-		return driver.Page{}, err
+	side := func(jpg []byte) driver.Side { return driver.Side{JPEG: jpg, XDPI: w.xRes, YDPI: w.yRes} }
+	page := driver.Page{Front: side(sides[0])}
+	if opts.Duplex {
+		back := side(sides[1])
+		page.Back = &back
 	}
-	if !opts.Duplex {
-		return driver.Page{Front: front}, nil
-	}
-	back, err := decodeSide(sides[1], w)
-	if err != nil {
-		return driver.Page{}, err
-	}
-	if isBlank(back) {
-		return driver.Page{Front: front, BackBlank: true}, nil
-	}
-	return driver.Page{Front: front, Back: back}, nil
+	return page, nil
 }
 
 func (s *session) Close() error {

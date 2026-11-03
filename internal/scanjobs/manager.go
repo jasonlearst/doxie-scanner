@@ -1,16 +1,15 @@
 package scanjobs
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"image"
-	"image/png"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
+	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
 
@@ -19,9 +18,49 @@ import (
 // just a single "busy" rejection.
 var ErrAlreadyRunning = errors.New("scanjobs: a scan is already in progress")
 
-// ScanDPI is the fixed resolution this application scans at, recorded in
-// job metadata for display purposes.
-const ScanDPI = 300
+const (
+	SidesSingle = "single"
+	SidesDouble = "double"
+	SidesAuto   = "auto"
+	ColorAuto   = "auto"
+)
+
+var (
+	Resolutions = []int{200, 300, 600}
+	sides       = []string{SidesSingle, SidesDouble, SidesAuto}
+	colors      = []string{string(pageimage.ColorColor), string(pageimage.ColorGray), string(pageimage.ColorBW), ColorAuto}
+)
+
+// DefaultSettings mirror the Doxie app's own defaults.
+var DefaultSettings = storage.ScanSettings{Resolution: 300, Sides: SidesAuto, Color: ColorAuto}
+
+// WithDefaults fills any unset field from DefaultSettings.
+func WithDefaults(s storage.ScanSettings) storage.ScanSettings {
+	if s.Resolution == 0 {
+		s.Resolution = DefaultSettings.Resolution
+	}
+	if s.Sides == "" {
+		s.Sides = DefaultSettings.Sides
+	}
+	if s.Color == "" {
+		s.Color = DefaultSettings.Color
+	}
+	return s
+}
+
+// Validate rejects settings the scanner or this app can't honor.
+func Validate(s storage.ScanSettings) error {
+	if !slices.Contains(Resolutions, s.Resolution) {
+		return fmt.Errorf("resolution must be one of %v dpi", Resolutions)
+	}
+	if !slices.Contains(sides, s.Sides) {
+		return fmt.Errorf("sides must be one of %v", sides)
+	}
+	if !slices.Contains(colors, s.Color) {
+		return fmt.Errorf("color must be one of %v", colors)
+	}
+	return nil
+}
 
 // Manager orchestrates scan jobs against a driver.Driver, persisting
 // results via a storage.Store.
@@ -42,9 +81,7 @@ func NewManager(drv driver.Driver, store *storage.Store) *Manager {
 // CurrentJob returns a snapshot of the most recently started job's live
 // state, or nil if no scan has ever been started. Callers should treat
 // this as authoritative only while Status == storage.StatusRunning;
-// once finished, storage.Store holds the authoritative persisted record
-// (this in-memory copy is just for live progress during a scan, and
-// doesn't survive a process restart).
+// once finished, storage.Store holds the authoritative persisted record.
 func (m *Manager) CurrentJob() *JobState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -55,11 +92,18 @@ func (m *Manager) CurrentJob() *JobState {
 	return &cp
 }
 
+// Scanning reports whether a scan currently holds the scanner.
+func (m *Manager) Scanning() bool {
+	job := m.CurrentJob()
+	return job != nil && job.Status == storage.StatusRunning
+}
+
 // StartScan begins a new scan job in the background and returns its job
-// ID immediately; the caller polls CurrentJob (or re-reads the job from
-// storage once it's no longer the current job) for progress. Returns
-// ErrAlreadyRunning if a scan is already in progress.
-func (m *Manager) StartScan(duplex bool) (string, error) {
+// ID immediately. Settings must already have passed Validate.
+func (m *Manager) StartScan(settings storage.ScanSettings) (string, error) {
+	if err := Validate(settings); err != nil {
+		return "", err
+	}
 	m.mu.Lock()
 	if m.running != nil && m.running.Status == storage.StatusRunning {
 		m.mu.Unlock()
@@ -76,8 +120,8 @@ func (m *Manager) StartScan(duplex bool) (string, error) {
 		Driver:    m.drv.Info().Name,
 		CreatedAt: now,
 		Status:    storage.StatusRunning,
-		Duplex:    duplex,
-		DPI:       ScanDPI,
+		Settings:  settings,
+		Pages:     []storage.PageMeta{},
 	}
 	if err := m.store.CreateJob(meta); err != nil {
 		m.mu.Lock()
@@ -87,18 +131,13 @@ func (m *Manager) StartScan(duplex bool) (string, error) {
 		return "", fmt.Errorf("scanjobs: create job: %w", err)
 	}
 
-	// The scan must outlive whatever request triggered it, so it runs
-	// against its own background context, not the caller's.
-	go m.run(context.Background(), id, duplex, meta)
+	// The scan must outlive whatever request triggered it.
+	go m.run(context.Background(), id, meta)
 
 	return id, nil
 }
 
-// run drives the actual scan loop. It's a separate method (rather than
-// inlined into the goroutine literal in StartScan) specifically so tests
-// can call it synchronously without needing to poll for a background
-// goroutine to finish.
-func (m *Manager) run(ctx context.Context, id string, duplex bool, meta storage.JobMeta) {
+func (m *Manager) run(ctx context.Context, id string, meta storage.JobMeta) {
 	sess, err := m.drv.Open(ctx)
 	if err != nil {
 		m.finish(id, &meta, err)
@@ -106,8 +145,11 @@ func (m *Manager) run(ctx context.Context, id string, duplex bool, meta storage.
 	}
 	defer sess.Close()
 
-	nextIndex := 0
-	for {
+	opts := driver.ScanOptions{
+		Duplex:     meta.Settings.Sides != SidesSingle,
+		Resolution: meta.Settings.Resolution,
+	}
+	for sheet := 1; ; sheet++ {
 		hasNext, err := sess.HasNextPage(ctx)
 		if err != nil {
 			m.finish(id, &meta, err)
@@ -117,46 +159,76 @@ func (m *Manager) run(ctx context.Context, id string, duplex bool, meta storage.
 			break
 		}
 
-		sheet, err := sess.ScanPage(ctx, driver.ScanOptions{Duplex: duplex})
+		scanned, err := sess.ScanPage(ctx, opts)
 		if err != nil {
 			m.finish(id, &meta, err)
 			return
 		}
 
-		// Each side of a physical sheet becomes its own independent page,
-		// with its own sequential number — a duplex sheet yields two
-		// pages (e.g. 1 and 2), not one page with an attached back image.
-		// A blank detected back (sheet.Back == nil) simply doesn't
-		// produce a second page.
-		nextIndex++
-		frontMeta, err := m.saveImage(id, nextIndex, sheet.Front)
+		front, err := m.addSide(id, sheet, "front", scanned.Front, meta.Settings)
 		if err != nil {
 			m.finish(id, &meta, err)
 			return
 		}
-		meta.Pages = append(meta.Pages, frontMeta)
-
-		if sheet.Back != nil {
-			nextIndex++
-			backMeta, err := m.saveImage(id, nextIndex, sheet.Back)
+		meta.Pages = append(meta.Pages, front)
+		if scanned.Back != nil {
+			back, err := m.addSide(id, sheet, "back", *scanned.Back, meta.Settings)
 			if err != nil {
 				m.finish(id, &meta, err)
 				return
 			}
-			meta.Pages = append(meta.Pages, backMeta)
+			meta.Pages = append(meta.Pages, back)
 		}
 
-		meta.PageCount = len(meta.Pages)
-		_ = m.store.SaveMeta(meta) // best-effort progress checkpoint; final save happens at completion regardless
+		_ = m.store.SaveMeta(meta) // best-effort checkpoint; the final save happens regardless
 
 		m.mu.Lock()
 		if m.running != nil && m.running.ID == id {
-			m.running.PagesScanned = len(meta.Pages)
+			m.running.PagesScanned = len(meta.VisiblePages())
 		}
 		m.mu.Unlock()
 	}
 
 	m.finish(id, &meta, nil)
+}
+
+// addSide stores the scanner's JPEG untouched, then decodes it once to
+// judge blankness and color and to pre-render the thumbnail the UI shows
+// first. A blank back is hidden, never discarded, and only when the user
+// chose Auto sides: a back with only a signature can look blank.
+func (m *Manager) addSide(jobID string, sheet int, side string, s driver.Side, settings storage.ScanSettings) (storage.PageMeta, error) {
+	pageID := storage.PageID(sheet, side)
+	page := storage.PageMeta{
+		ID:    pageID,
+		File:  storage.PageFilename(pageID),
+		Sheet: sheet,
+		Side:  side,
+		XDPI:  s.XDPI,
+		YDPI:  s.YDPI,
+	}
+	if err := m.store.SavePageFile(jobID, page.File, s.JPEG); err != nil {
+		return page, err
+	}
+
+	img, err := pageimage.Decode(s.JPEG, s.XDPI, s.YDPI)
+	if err != nil {
+		return page, fmt.Errorf("scanjobs: sheet %d %s: %w", sheet, side, err)
+	}
+	page.WidthPx, page.HeightPx = img.Bounds().Dx(), img.Bounds().Dy()
+	page.Blank = side == "back" && pageimage.IsBlank(img)
+	page.Hidden = page.Blank && settings.Sides == SidesAuto
+
+	page.Edits.Color = pageimage.ColorMode(settings.Color)
+	if settings.Color == ColorAuto {
+		page.Edits.Color = pageimage.DetectColorMode(img)
+	}
+
+	thumb, err := pageimage.RenderView(img, page.Edits, "thumb")
+	if err != nil {
+		return page, err
+	}
+	_ = m.store.SaveRender(jobID, pageID, pageimage.CacheKey(page.Edits, "thumb"), thumb) // a cache miss later just re-renders
+	return page, nil
 }
 
 // finish records a job's terminal state, both in the persisted metadata
@@ -178,38 +250,4 @@ func (m *Manager) finish(id string, meta *storage.JobMeta, runErr error) {
 		m.running.Err = runErr
 	}
 	m.mu.Unlock()
-}
-
-// saveImage encodes one scanned image (either side of a sheet) as PNG and
-// persists it under the given page index, returning the metadata record
-// to append to the job's page list.
-func (m *Manager) saveImage(jobID string, index int, img image.Image) (storage.PageMeta, error) {
-	data, err := encodePNG(img)
-	if err != nil {
-		return storage.PageMeta{}, fmt.Errorf("scanjobs: encode page %d: %w", index, err)
-	}
-	file := storage.PageFilename(index)
-	if err := m.store.SavePageFile(jobID, file, data); err != nil {
-		return storage.PageMeta{}, err
-	}
-	return storage.PageMeta{
-		Index:    index,
-		File:     file,
-		WidthPx:  img.Bounds().Dx(),
-		HeightPx: img.Bounds().Dy(),
-	}, nil
-}
-
-// pngEncode is a package-level indirection purely so tests can exercise
-// the encode-failure path (extremely hard to trigger with any real
-// image.Image, since driver implementations never hand back one that
-// png.Encode itself rejects) without needing a contrived image value.
-var pngEncode = png.Encode
-
-func encodePNG(img image.Image) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := pngEncode(&buf, img); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }

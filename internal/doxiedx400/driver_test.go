@@ -1,9 +1,11 @@
 package doxiedx400
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"image"
+	"image/jpeg"
 	"testing"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
@@ -67,7 +69,16 @@ func TestHasNextPage(t *testing.T) {
 	}
 }
 
-func TestScanPage_DuplexDropsBlankBack(t *testing.T) {
+func decodes(t *testing.T, s driver.Side) image.Point {
+	t.Helper()
+	img, err := jpeg.Decode(bytes.NewReader(s.JPEG))
+	if err != nil {
+		t.Fatalf("side does not decode: %v", err)
+	}
+	return img.Bounds().Size()
+}
+
+func TestScanPage_DuplexReturnsBothSidesEvenWhenBlank(t *testing.T) {
 	dev := &fakeDevice{t: t}
 	dev.scriptSheet(true,
 		scriptedSide{fixture(t, "ink-300.scan"), 32},
@@ -77,25 +88,28 @@ func TestScanPage_DuplexDropsBlankBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Front == nil || page.Front.Bounds().Size() != (image.Point{2550, 32}) {
-		t.Errorf("front: %v", page.Front)
+	if got := decodes(t, page.Front); got != (image.Point{2550, 32}) {
+		t.Errorf("front: %v", got)
 	}
-	if !page.BackBlank || page.Back != nil {
-		t.Errorf("blank back should be dropped: BackBlank=%v Back=%v", page.BackBlank, page.Back)
+	if page.Back == nil {
+		t.Fatal("a blank back must still be returned; dropping it is the caller's decision")
+	}
+	decodes(t, *page.Back)
+	if page.Front.XDPI != 300 || page.Front.YDPI != 300 {
+		t.Errorf("dpi: %dx%d", page.Front.XDPI, page.Front.YDPI)
 	}
 }
 
-func TestScanPage_DuplexKeepsInkedBack(t *testing.T) {
+func TestScanPage_200dpiReportsNonSquareSampling(t *testing.T) {
 	dev := &fakeDevice{t: t}
-	ink := fixture(t, "ink-300.scan")
-	dev.scriptSheet(true, scriptedSide{ink, 32}, scriptedSide{ink, 32})
+	dev.scriptSheet(false, scriptedSide{fixture(t, "ink-300.scan"), 32})
 
-	page, err := openFake(t, dev).ScanPage(context.Background(), driver.ScanOptions{Duplex: true, Resolution: 300})
+	page, err := openFake(t, dev).ScanPage(context.Background(), driver.ScanOptions{Resolution: 200})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Back == nil || page.BackBlank {
-		t.Error("an inked back should be kept")
+	if page.Front.XDPI != 300 || page.Front.YDPI != 200 {
+		t.Errorf("200 dpi is read at 300 across: got %dx%d", page.Front.XDPI, page.Front.YDPI)
 	}
 }
 
@@ -107,7 +121,7 @@ func TestScanPage_SimplexDefaultsTo300(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Back != nil || page.BackBlank {
+	if page.Back != nil {
 		t.Error("simplex scan should have no back")
 	}
 	window := dev.payloads[0]
@@ -138,20 +152,5 @@ func TestSessionClose(t *testing.T) {
 	dev := &fakeDevice{t: t}
 	if err := openFake(t, dev).Close(); err != nil || !dev.closed {
 		t.Fatalf("close: %v, closed=%v", err, dev.closed)
-	}
-}
-
-func TestScanPage_UndecodableSideFails(t *testing.T) {
-	ink := fixture(t, "ink-300.scan")
-	garbage := scriptedSide{[]byte{0x01, 0x02, 0x03}, 32}
-	for name, sides := range map[string][]scriptedSide{
-		"front": {garbage, {ink, 32}},
-		"back":  {{ink, 32}, garbage},
-	} {
-		dev := &fakeDevice{t: t}
-		dev.scriptSheet(true, sides...)
-		if _, err := openFake(t, dev).ScanPage(context.Background(), driver.ScanOptions{Duplex: true}); err == nil {
-			t.Errorf("%s: expected a decode error", name)
-		}
 	}
 }
