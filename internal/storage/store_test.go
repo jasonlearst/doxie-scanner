@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,7 +76,7 @@ func TestStore_DeleteJob_Error(t *testing.T) {
 	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SavePageFile("job1", "page-001.png", []byte("x")); err != nil {
+	if err := s.SavePageFile("job1", "001f.jpg", []byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	// Removing read permission on the job dir itself prevents RemoveAll
@@ -230,11 +231,11 @@ func TestStore_PageFileRoundTrip(t *testing.T) {
 	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
 		t.Fatal(err)
 	}
-	data := []byte("fake png bytes")
-	if err := s.SavePageFile("job1", "page-001.png", data); err != nil {
+	data := []byte("fake jpeg bytes")
+	if err := s.SavePageFile("job1", "001f.jpg", data); err != nil {
 		t.Fatalf("SavePageFile: %v", err)
 	}
-	got, err := s.LoadPageFile("job1", "page-001.png")
+	got, err := s.LoadPageFile("job1", "001f.jpg")
 	if err != nil {
 		t.Fatalf("LoadPageFile: %v", err)
 	}
@@ -242,82 +243,26 @@ func TestStore_PageFileRoundTrip(t *testing.T) {
 		t.Errorf("got %q, want %q", got, data)
 	}
 
-	if err := s.DeletePageFile("job1", "page-001.png"); err != nil {
+	if err := s.DeletePageFile("job1", "001f.jpg"); err != nil {
 		t.Fatalf("DeletePageFile: %v", err)
 	}
-	if _, err := s.LoadPageFile("job1", "page-001.png"); err == nil {
+	if _, err := s.LoadPageFile("job1", "001f.jpg"); err == nil {
 		t.Fatal("expected an error after deletion")
-	}
-}
-
-func TestStore_PageFilePath(t *testing.T) {
-	s := New(t.TempDir())
-	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
-		t.Fatal(err)
-	}
-	data := []byte("fake png bytes")
-	if err := s.SavePageFile("job1", "page-001.png", data); err != nil {
-		t.Fatalf("SavePageFile: %v", err)
-	}
-
-	path := s.PageFilePath("job1", "page-001.png")
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("expected PageFilePath to return a real, readable path: %v", err)
-	}
-	if string(got) != string(data) {
-		t.Errorf("got %q, want %q", got, data)
 	}
 }
 
 func TestStore_SavePageFile_Error(t *testing.T) {
 	s := New(t.TempDir())
 	// Job directory was never created, so pages/ doesn't exist.
-	if err := s.SavePageFile("no-such-job", "page-001.png", []byte("x")); err == nil {
+	if err := s.SavePageFile("no-such-job", "001f.jpg", []byte("x")); err == nil {
 		t.Fatal("expected an error")
 	}
 }
 
 func TestStore_DeletePageFile_Error(t *testing.T) {
 	s := New(t.TempDir())
-	if err := s.DeletePageFile("no-such-job", "page-001.png"); err == nil {
+	if err := s.DeletePageFile("no-such-job", "001f.jpg"); err == nil {
 		t.Fatal("expected an error")
-	}
-}
-
-func TestStore_RenamePageFile(t *testing.T) {
-	s := New(t.TempDir())
-	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
-		t.Fatal(err)
-	}
-	data := []byte("fake png bytes")
-	if err := s.SavePageFile("job1", "page-002.png", data); err != nil {
-		t.Fatalf("SavePageFile: %v", err)
-	}
-
-	if err := s.RenamePageFile("job1", "page-002.png", "page-001.png"); err != nil {
-		t.Fatalf("RenamePageFile: %v", err)
-	}
-
-	got, err := s.LoadPageFile("job1", "page-001.png")
-	if err != nil {
-		t.Fatalf("LoadPageFile(renamed): %v", err)
-	}
-	if string(got) != string(data) {
-		t.Errorf("got %q, want %q", got, data)
-	}
-	if _, err := s.LoadPageFile("job1", "page-002.png"); err == nil {
-		t.Error("expected the old filename to no longer exist")
-	}
-}
-
-func TestStore_RenamePageFile_Error(t *testing.T) {
-	s := New(t.TempDir())
-	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.RenamePageFile("job1", "does-not-exist.png", "page-001.png"); err == nil {
-		t.Fatal("expected an error renaming a nonexistent source file")
 	}
 }
 
@@ -350,5 +295,148 @@ func TestStore_Root(t *testing.T) {
 	s := New("/some/path")
 	if s.Root() != "/some/path" {
 		t.Errorf("got %q", s.Root())
+	}
+}
+
+func TestStore_RenderCache(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.LoadRender("job1", "001f", "k1"); ok {
+		t.Fatal("nothing cached yet")
+	}
+	for _, key := range []string{"k1", "k2"} {
+		if err := s.SaveRender("job1", "001f", key, []byte(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SaveRender("job1", "002f", "k1", []byte("other page")); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.LoadRender("job1", "001f", "k2"); !ok || string(got) != "k2" {
+		t.Errorf("LoadRender: got %q, %v", got, ok)
+	}
+
+	if err := s.DeleteRenders("job1", "001f"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.LoadRender("job1", "001f", "k1"); ok {
+		t.Error("renders of 001f should be gone")
+	}
+	if _, ok := s.LoadRender("job1", "002f", "k1"); !ok {
+		t.Error("other pages' renders must survive")
+	}
+}
+
+func TestStore_DeletePageFileDropsItsRenders(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SavePageFile("job1", "001f.jpg", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveRender("job1", "001f", "thumb", []byte("t")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeletePageFile("job1", "001f.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.LoadRender("job1", "001f", "thumb"); ok {
+		t.Error("deleting a page should drop its cached renders")
+	}
+}
+
+func TestStore_SaveRender_Error(t *testing.T) {
+	s := New(t.TempDir())
+	if err := os.WriteFile(filepath.Join(s.Root(), "jobs"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveRender("job1", "001f", "k", []byte("x")); err == nil {
+		t.Fatal("expected an error when the cache directory can't be created")
+	}
+}
+
+func TestStore_DeleteRenders_Error(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveRender("job1", "001f", "k", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(s.Root(), "jobs", "job1", "pages", ".render")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	if err := s.DeleteRenders("job1", "001f"); err == nil {
+		t.Fatal("expected an error when a cached file can't be removed")
+	}
+}
+
+func TestStore_Settings(t *testing.T) {
+	s := New(t.TempDir())
+	if got, err := s.LoadSettings(); err != nil || got != (AppSettings{}) {
+		t.Fatalf("no file yet should give zero settings, got %+v %v", got, err)
+	}
+	want := AppSettings{ButtonScan: ScanSettings{Resolution: 600, Sides: "double", Color: "gray"}}
+	if err := s.SaveSettings(want); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.LoadSettings(); err != nil || got != want {
+		t.Errorf("round trip: got %+v %v", got, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(s.Root(), "settings.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSettings(); err == nil {
+		t.Error("corrupt settings should fail to load")
+	}
+	if err := os.Chmod(filepath.Join(s.Root(), "settings.json"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(s.Root(), "settings.json"), 0o644) })
+	if _, err := s.LoadSettings(); err == nil {
+		t.Error("unreadable settings should fail to load")
+	}
+	if err := s.SaveSettings(want); err == nil {
+		t.Error("unwritable settings should fail to save")
+	}
+}
+
+func TestStore_UpdateMeta(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.CreateJob(JobMeta{ID: "job1", Name: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.UpdateMeta("job1", func(m *JobMeta) error { m.Name = "b"; return nil })
+	if err != nil || got.Name != "b" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if saved, _ := s.LoadMeta("job1"); saved.Name != "b" {
+		t.Error("the change should be saved")
+	}
+
+	stop := errors.New("rejected")
+	if _, err := s.UpdateMeta("job1", func(m *JobMeta) error { m.Name = "c"; return stop }); !errors.Is(err, stop) {
+		t.Errorf("a rejected change returns its error, got %v", err)
+	}
+	if saved, _ := s.LoadMeta("job1"); saved.Name != "b" {
+		t.Error("a rejected change must not be saved")
+	}
+	if _, err := s.UpdateMeta("nope", func(*JobMeta) error { return nil }); !errors.Is(err, ErrJobNotFound) {
+		t.Errorf("unknown job: got %v", err)
+	}
+
+	metaPath := filepath.Join(s.Root(), "jobs", "job1", "meta.json")
+	if err := os.Chmod(metaPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(metaPath, 0o644) })
+	if _, err := s.UpdateMeta("job1", func(*JobMeta) error { return nil }); err == nil {
+		t.Error("a failed save should surface")
 	}
 }

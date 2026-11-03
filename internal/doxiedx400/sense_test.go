@@ -58,3 +58,12 @@ func TestParseSense_RejectsShortBlock(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 }
+
+func TestSenseErr_KnownConditionsReadPlainly(t *testing.T) {
+	for ascq, want := range map[byte]error{0x01: ErrPaperJam, 0x02: ErrCoverOpen, 0x03: ErrNoPaper, 0x05: ErrMultiFeed} {
+		s, _ := parseSense(senseBlock(ascADF, ascq, 0, 0, 0))
+		if !errors.Is(s.err(), want) {
+			t.Errorf("ascq %#02x: got %v, want %v", ascq, s.err(), want)
+		}
+	}
+}

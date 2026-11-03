@@ -1,10 +1,5 @@
-// Package pdfexport renders scanned page images into PDF documents,
-// either a single page or an arbitrary ordered sequence of pages (used
-// both for "export this page as PDF" and for combining pages picked
-// from any number of past scan jobs into one document). It knows
-// nothing about jobs or storage — callers resolve whatever pages they
-// want into image.Image values first; this package only turns images
-// into PDF bytes.
+// Package pdfexport assembles pages into a PDF, each page sized to its
+// real physical dimensions. It knows nothing about jobs or storage.
 package pdfexport
 
 import (
@@ -18,92 +13,85 @@ import (
 	"github.com/go-pdf/fpdf"
 )
 
-// ScanDPI is the resolution this application always scans at. Each PDF
-// page is sized to the source image's real physical dimensions at this
-// DPI (e.g. a 2544px-wide scan becomes an 8.48in-wide page), rather than
-// being stretched or squashed into a fixed Letter/A4 box.
-const ScanDPI = 300.0
-
-// JPEGQuality is used whenever a PDF embeds pages as JPEG, and is also
-// reused by export_handlers.go's standalone "smaller" JPEG image export
-// option — the same "convenience" quality tier wherever it applies, so
-// there's one number to change rather than two kept in sync by hand.
-// Deliberately lower than export_handlers.go's default standalone JPEG
-// quality (100): that's the "I want the best quality" tier, this is the
-// "I want it smaller" one. Callers who want the best possible fidelity
-// in a PDF should choose FormatPNG instead.
+// JPEGQuality is used for pages that had to be re-rendered (edited).
 const JPEGQuality = 90
 
-// ImageFormat selects how CombinePagesPDF/SinglePagePDF embed each page's
-// pixels in the output PDF.
-type ImageFormat int
+// Page is one encoded PDF page. Pages hold compressed bytes, not decoded
+// images, so a long 600 dpi job doesn't need every page in memory at once.
+type Page struct {
+	Data     []byte
+	Format   string // "JPEG" or "PNG"
+	WidthIn  float64
+	HeightIn float64
+}
 
-const (
-	// FormatPNG embeds pages losslessly — larger files, no quality loss.
-	// Best for scans of photos/art where JPEG artifacts would show.
-	FormatPNG ImageFormat = iota
-	// FormatJPEG embeds pages as JPEG at jpegQuality — much smaller
-	// files, with no visible difference on typical text/document scans.
-	FormatJPEG
+// FromJPEG embeds a JPEG byte for byte, so an unedited scan never loses
+// quality.
+func FromJPEG(jpg []byte, widthIn, heightIn float64) Page {
+	return Page{Data: jpg, Format: "JPEG", WidthIn: widthIn, HeightIn: heightIn}
+}
+
+var (
+	pngEncode  = png.Encode
+	jpegEncode = func(w io.Writer, img image.Image) error {
+		return jpeg.Encode(w, img, &jpeg.Options{Quality: JPEGQuality})
+	}
 )
 
-// pngEncode and jpegEncode are package-level indirections purely so
-// tests can exercise encode-failure paths without needing a contrived
-// image.Image value (see the equivalent pattern in internal/scanjobs).
-var pngEncode = png.Encode
-var jpegEncode = func(w io.Writer, img image.Image) error {
-	return jpeg.Encode(w, img, &jpeg.Options{Quality: JPEGQuality})
+// FromImage encodes an edited page right away: pure black & white as
+// lossless PNG (tiny, and crisp for OCR), anything else as JPEG.
+func FromImage(img image.Image, widthIn, heightIn float64) (Page, error) {
+	var buf bytes.Buffer
+	encode, format := jpegEncode, "JPEG"
+	if bilevel(img) {
+		encode, format = pngEncode, "PNG"
+	}
+	if err := encode(&buf, img); err != nil {
+		return Page{}, fmt.Errorf("pdfexport: encode page: %w", err)
+	}
+	return Page{Data: buf.Bytes(), Format: format, WidthIn: widthIn, HeightIn: heightIn}, nil
 }
 
-// SinglePagePDF renders one image as a single-page PDF.
-func SinglePagePDF(img image.Image, format ImageFormat) ([]byte, error) {
-	return CombinePagesPDF([]image.Image{img}, format)
-}
-
-// CombinePagesPDF renders images, in the given order, into one
-// multi-page PDF.
-func CombinePagesPDF(images []image.Image, format ImageFormat) ([]byte, error) {
-	if len(images) == 0 {
-		return nil, fmt.Errorf("pdfexport: no images given")
+// Build assembles pages, in order, into one PDF.
+func Build(pages []Page) ([]byte, error) {
+	if len(pages) == 0 {
+		return nil, fmt.Errorf("pdfexport: no pages given")
 	}
 
 	pdf := fpdf.New("P", "in", "Letter", "")
 	pdf.SetMargins(0, 0, 0)
 	pdf.SetAutoPageBreak(false, 0)
 
-	for i, img := range images {
-		if img == nil {
-			return nil, fmt.Errorf("pdfexport: page %d is nil", i)
+	for i, p := range pages {
+		if p.WidthIn <= 0 || p.HeightIn <= 0 || len(p.Data) == 0 {
+			return nil, fmt.Errorf("pdfexport: page %d is empty or has no size", i+1)
 		}
-		bounds := img.Bounds()
-		w := float64(bounds.Dx()) / ScanDPI
-		h := float64(bounds.Dy()) / ScanDPI
-
-		var buf bytes.Buffer
-		imageType := "PNG"
-		encode := pngEncode
-		if format == FormatJPEG {
-			imageType = "JPEG"
-			encode = jpegEncode
-		}
-		if err := encode(&buf, img); err != nil {
-			return nil, fmt.Errorf("pdfexport: encode page %d: %w", i, err)
-		}
-
-		pdf.AddPageFormat("P", fpdf.SizeType{Wd: w, Ht: h})
+		pdf.AddPageFormat("P", fpdf.SizeType{Wd: p.WidthIn, Ht: p.HeightIn})
 		name := fmt.Sprintf("page%d", i)
-		opts := fpdf.ImageOptions{ImageType: imageType}
-		pdf.RegisterImageOptionsReader(name, opts, &buf)
-		pdf.ImageOptions(name, 0, 0, w, h, false, opts, 0, "")
+		opts := fpdf.ImageOptions{ImageType: p.Format}
+		pdf.RegisterImageOptionsReader(name, opts, bytes.NewReader(p.Data))
+		pdf.ImageOptions(name, 0, 0, p.WidthIn, p.HeightIn, false, opts, 0, "")
 	}
 
 	if err := pdf.Error(); err != nil {
 		return nil, fmt.Errorf("pdfexport: %w", err)
 	}
-
 	var out bytes.Buffer
 	if err := pdf.Output(&out); err != nil {
 		return nil, fmt.Errorf("pdfexport: output: %w", err)
 	}
 	return out.Bytes(), nil
+}
+
+func bilevel(img image.Image) bool {
+	g, ok := img.(*image.Gray)
+	if !ok {
+		return false
+	}
+	for _, v := range g.Pix {
+		if v != 0 && v != 0xff {
+			return false
+		}
+	}
+	return true
 }

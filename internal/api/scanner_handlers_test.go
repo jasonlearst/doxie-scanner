@@ -1,118 +1,137 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
+	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
 	"github.com/andiapps-dev/doxie-scanner/internal/scsiusb"
+	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
 
+func status(t *testing.T, srv *Server) scannerStatusResponse {
+	t.Helper()
+	return decode[scannerStatusResponse](t, do(srv, http.MethodGet, "/api/scanner/status", nil))
+}
+
 func TestHandleVersion(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}}
-	srv, _ := newTestServer(t, drv)
+	srv, _ := newTestServer(t, &fakeDriver{})
+	if got := decode[versionResponse](t, do(srv, http.MethodGet, "/api/version", nil)); got.Version != "test" {
+		t.Errorf("version %q", got.Version)
+	}
+}
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/version", nil))
+func TestScannerStatus_Connected(t *testing.T) {
+	srv, _ := newTestServer(t, &fakeDriver{info: driver.Info{Name: "doxie-dx400", VID: 0x2740, PID: 0x000c}})
+	waitFor(t, "connected", func() bool { return status(t, srv).Connected })
+	resp := status(t, srv)
+	if resp.VID != "0x2740" || resp.PID != "0x000c" || resp.Driver != "doxie-dx400" || resp.Error != nil || resp.Paper {
+		t.Errorf("got %+v", resp)
+	}
+}
+
+func TestScannerStatus_ReportsPaper(t *testing.T) {
+	srv, _ := newTestServer(t, &fakeDriver{session: paperWith(t, textImage(60, 90))})
+	waitFor(t, "paper", func() bool { return status(t, srv).Paper })
+}
+
+func TestScannerStatus_Unreachable(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		code string
+	}{
+		"asleep":       {&scsiusb.ErrDeviceNotFound{VID: 0x2740, PID: 0x000c}, "device_not_found"},
+		"held by app":  {&scsiusb.ErrClaimInterface{Cause: errors.New("busy")}, "claim_interface_failed"},
+		"other errors": {&scsiusb.ScsiError{Message: "boom"}, "scsi_error"},
+	}
+	for name, c := range cases {
+		srv, _ := newTestServer(t, &fakeDriver{openErr: c.err})
+		waitFor(t, name, func() bool { e := status(t, srv).Error; return e != nil && e.Code == c.code })
+		resp := status(t, srv)
+		if resp.Connected || resp.Error.Code != c.code {
+			t.Errorf("%s: got %+v", name, resp)
+		}
+		if c.code == "device_not_found" && resp.Error.Message != asleepMessage {
+			t.Errorf("an absent scanner should read as asleep, got %q", resp.Error.Message)
+		}
+	}
+}
+
+func TestScannerStatus_BusyWhileScanning(t *testing.T) {
+	srv, _, _, _ := runningServer(t)
+	resp := status(t, srv)
+	if !resp.Connected || !resp.Busy || resp.Error != nil {
+		t.Errorf("a scanner in use by our own scan is connected and busy, got %+v", resp)
+	}
+}
+
+func TestSettings(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	if got := decode[storage.AppSettings](t, do(srv, http.MethodGet, "/api/settings", nil)); got.ButtonScan != scanjobs.DefaultSettings {
+		t.Errorf("unsaved settings should read as the defaults, got %+v", got)
+	}
+
+	rec := do(srv, http.MethodPut, "/api/settings", map[string]any{"buttonScan": map[string]any{"resolution": 600, "sides": "double"}})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
 	}
-	var resp versionResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
+	want := storage.ScanSettings{Resolution: 600, Sides: "double", Color: "auto"}
+	if saved, _ := store.LoadSettings(); saved.ButtonScan != want {
+		t.Errorf("saved %+v", saved.ButtonScan)
 	}
-	if resp.Version != "test" {
-		t.Errorf("Version = %q, want %q (from newTestServer)", resp.Version, "test")
+
+	for _, body := range []any{"{", map[string]any{"buttonScan": map[string]any{"resolution": 150}}} {
+		if rec := do(srv, http.MethodPut, "/api/settings", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%v: status %d", body, rec.Code)
+		}
 	}
 }
 
-func TestHandleScannerStatus_Connected(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400", VID: 0x2740, PID: 0x000c}}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scanner/status", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+func TestSettings_StorageFailures(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	path := filepath.Join(store.Root(), "settings.json")
+	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	var resp scannerStatusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
+	if rec := do(srv, http.MethodGet, "/api/settings", nil); rec.Code != http.StatusInternalServerError {
+		t.Errorf("corrupt settings: status %d", rec.Code)
 	}
-	if !resp.Connected {
-		t.Error("expected connected=true")
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
 	}
-	if resp.VID != "0x2740" || resp.PID != "0x000c" {
-		t.Errorf("unexpected vid/pid: %+v", resp)
-	}
-	if resp.Error != nil {
-		t.Errorf("expected no error, got %+v", resp.Error)
+	t.Cleanup(func() { os.Chmod(path, 0o644) })
+	if rec := do(srv, http.MethodPut, "/api/settings", map[string]any{}); rec.Code != http.StatusInternalServerError {
+		t.Errorf("unwritable settings: status %d", rec.Code)
 	}
 }
 
-func TestHandleScannerStatus_DeviceNotFound(t *testing.T) {
-	drv := &fakeDriver{
-		info:      driver.Info{Name: "doxie-dx400", VID: 0x2740, PID: 0x000c},
-		detectErr: &scsiusb.ErrDeviceNotFound{VID: 0x2740, PID: 0x000c},
+func TestSettings_Retention(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	got := decode[storage.AppSettings](t, do(srv, http.MethodGet, "/api/settings", nil))
+	if got.RetentionDays == nil || *got.RetentionDays != 7 {
+		t.Errorf("default retention should read as 7 days, got %v", got.RetentionDays)
 	}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scanner/status", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (not-connected is a normal poll result)", rec.Code)
+	if rec := do(srv, http.MethodPut, "/api/settings", map[string]any{"retentionDays": 0}); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
 	}
-	var resp scannerStatusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
+	if saved, _ := store.LoadSettings(); saved.RetentionDays == nil || *saved.RetentionDays != 0 {
+		t.Errorf("0 (keep forever) must be stored explicitly, got %v", saved.RetentionDays)
 	}
-	if resp.Connected {
-		t.Error("expected connected=false")
-	}
-	if resp.Error == nil || resp.Error.Code != "device_not_found" {
-		t.Errorf("expected device_not_found error, got %+v", resp.Error)
+	for _, bad := range []int{-1, 4000} {
+		if rec := do(srv, http.MethodPut, "/api/settings", map[string]any{"retentionDays": bad}); rec.Code != http.StatusBadRequest {
+			t.Errorf("%d days: status %d", bad, rec.Code)
+		}
 	}
 }
 
-func TestHandleScannerStatus_ClaimInterfaceFailed(t *testing.T) {
-	drv := &fakeDriver{
-		info:      driver.Info{Name: "doxie-dx400"},
-		detectErr: &scsiusb.ErrClaimInterface{Cause: errors.New("permission denied")},
-	}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scanner/status", nil))
-
-	var resp scannerStatusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.Error == nil || resp.Error.Code != "claim_interface_failed" {
-		t.Errorf("expected claim_interface_failed error, got %+v", resp.Error)
-	}
-}
-
-func TestHandleScannerStatus_GenericScsiError(t *testing.T) {
-	drv := &fakeDriver{
-		info:      driver.Info{Name: "doxie-dx400"},
-		detectErr: &scsiusb.ScsiError{Opcode: 0x1b, Message: "boom"},
-	}
-	srv, _ := newTestServer(t, drv)
-
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/scanner/status", nil))
-
-	var resp scannerStatusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.Error == nil || resp.Error.Code != "scsi_error" {
-		t.Errorf("expected scsi_error, got %+v", resp.Error)
+func TestScannerStatus_CheckingUntilFirstLook(t *testing.T) {
+	store := storage.New(t.TempDir())
+	srv := NewServer(&fakeDriver{}, scanjobs.NewManager(&fakeDriver{}, store), store, nil, "test")
+	if resp := status(t, srv); !resp.Checking || resp.Connected || resp.Error != nil {
+		t.Errorf("before the scanner has been looked for, status is checking with no error, got %+v", resp)
 	}
 }

@@ -1,713 +1,1043 @@
-(() => {
-  'use strict';
+import { api, ApiError, pageImage, pdfURL } from './api.js';
 
-  const state = {
-    jobs: [],
-    selectedJobId: null,
-    selectedJob: null,
-    // combineSelection maps "jobId|page" -> {jobId, page}; combineOrder is
-    // the same keys, but as an ordered array — the actual order pages will
-    // be combined in, which the user controls by dragging thumbnails in
-    // the combine bar. The Map is for O(1) "is this selected" lookups
-    // elsewhere (checkboxes); combineOrder is the source of truth for
-    // display order and for the final combine request.
-    combineSelection: new Map(),
-    combineOrder: [],
-    combineDragKey: null,
-    scanPollTimer: null,
-    cropper: null,
-    // Bumped on every reload so image URLs change and the browser can't
-    // serve a stale cached copy of a page that was just rotated/cropped.
-    renderNonce: 0,
-    // {jobId, page} for whichever page is open in the modal.
-    viewer: null,
-    dragSrcIndex: null,
-    busyDepth: 0,
-    scannerConnected: false,
-    scanning: false,
+/* ---------- DOM helpers ---------- */
+
+function h(tag, props, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'text') el.textContent = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, '');
+    else el.setAttribute(k, v);
+  }
+  for (const c of children.flat(Infinity)) {
+    if (c == null || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+
+function icon(name, cls = '') {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', `icon ${cls}`.trim());
+  svg.setAttribute('aria-hidden', 'true');
+  const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+  use.setAttribute('href', `#i-${name}`);
+  svg.append(use);
+  return svg;
+}
+
+let toastTimer;
+function toast(message) {
+  const el = document.getElementById('toast');
+  el.textContent = message;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
+}
+
+function failed(err) {
+  toast(err instanceof ApiError ? err.message : 'Something went wrong.');
+}
+
+/* ---------- Labels ---------- */
+
+const SIDES = { auto: 'Both sides, skip blanks', double: 'Both sides', single: 'One side' };
+const SIDES_SHORT = { auto: 'Auto', double: 'Both', single: 'One' };
+const COLORS = { auto: 'Auto color', color: 'Color', gray: 'Gray', bw: 'Black & white' };
+const COLORS_SHORT = { auto: 'Auto', color: 'Color', gray: 'Gray', bw: 'B&W' };
+
+function summary(s) {
+  return `${s.resolution} dpi · ${SIDES[s.sides]} · ${COLORS[s.color]}`;
+}
+
+function plural(n, one, many = `${one}s`) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+function dayLabel(iso) {
+  const d = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return 'Today';
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+}
+
+function timeLabel(iso) {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+/* ---------- State ---------- */
+
+const SETTINGS_KEY = 'scanSettings';
+
+const state = {
+  route: { name: 'home' },
+  status: null,
+  statusError: null,
+  options: null,
+  scanSettings: null,
+  scans: null,
+  scan: null,
+  scanError: null,
+  paperless: null,
+  splitDraft: null,
+  hiddenOpen: false,
+  starting: false,
+  notice: null,
+  seenPages: new Set(),
+};
+
+function loadScanSettings(defaults) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null');
+    if (saved) return { ...defaults, ...saved };
+  } catch { /* private mode or corrupt value: fall back to defaults */ }
+  return { ...defaults };
+}
+
+function saveScanSettings(s) {
+  state.scanSettings = s;
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* not persisted */ }
+}
+
+/* ---------- Scanner status ---------- */
+
+function scannerState() {
+  const s = state.status;
+  if (state.statusError) return { dot: 'red', title: "Can't reach the scanner app", text: state.statusError.message };
+  if (!s || s.checking) return { spinner: true, title: 'Checking the scanner…', text: '' };
+  if (s.busy) return { spinner: true, title: 'Scanning…', text: 'Pages show up as each sheet comes out.', busy: true };
+  if (!s.connected) {
+    const code = s.error && s.error.code;
+    if (code === 'device_not_found') return { dot: 'orange', title: 'Off', text: 'Press the power button on the scanner to turn it on.' };
+    if (code === 'claim_interface_failed') return { dot: 'red', title: 'Scanner is in use', text: 'Another app has the scanner. Close it, then wait a moment.' };
+    return { dot: 'red', title: 'Scanner problem', text: (s.error && s.error.message) || 'The scanner is not responding.' };
+  }
+  return s.paper
+    ? { dot: 'green', title: 'Ready', text: 'Paper is loaded.', ready: true }
+    : { dot: 'green', title: 'Ready', text: 'Put paper in the scanner, then tap Scan.', ready: true };
+}
+
+function statusCell(st) {
+  return h('div', { class: 'cell status-cell', role: 'status', 'aria-live': 'polite' },
+    st.spinner ? h('span', { class: 'spinner', 'aria-hidden': 'true' }) : h('span', { class: `dot ${st.dot || ''}`, 'aria-hidden': 'true' }),
+    h('div', { class: 'main' },
+      h('div', { class: 'title' }, st.title),
+      st.text && h('div', { class: 'subtitle' }, st.text)));
+}
+
+/* ---------- Scan list helpers ---------- */
+
+function needsReview(s) {
+  if (s.status === 'running') return true;
+  if (s.sent.failed > 0) return true;
+  return s.sent.total === 0 && (s.pageCount > 0 || s.status === 'failed');
+}
+
+// Scanner errors read "what happened: what to do"; lists show only the first part.
+function shortError(err) {
+  return (err || 'scanner problem').split(':')[0];
+}
+
+// "paper jam: open the scanner" → "Paper jam. Open the scanner."
+function sentence(err) {
+  if (!err) return '';
+  const [what, ...todo] = err.split(': ');
+  const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+  return [what, todo.join(': ')].filter(Boolean).map((t) => cap(t.trim()).replace(/[^.!?]$/, '$&.')).join(' ');
+}
+
+function scanStatus(s) {
+  if (s.status === 'running') return { text: 'Scanning…', tone: 'blue' };
+  if (s.status === 'failed' && s.pageCount === 0) return { text: `Stopped: ${shortError(s.error)}`, tone: 'red' };
+  if (s.sent.failed > 0) return { text: 'Couldn’t send', tone: 'red' };
+  if (s.sent.total > 0 && s.sent.done === s.sent.total) return { text: 'Filed in Paperless', tone: 'green' };
+  if (s.sent.total > 0) return { text: 'Sent, waiting for Paperless', tone: '' };
+  if (s.status === 'failed') return { text: 'Stopped early · To review', tone: 'orange' };
+  return { text: 'To review', tone: 'orange' };
+}
+
+function scanRow(s, selected) {
+  const status = scanStatus(s);
+  const cover = s.coverPage
+    ? h('img', { class: 'thumb', alt: '', loading: 'lazy', src: `/api/scans/${s.id}/pages/${s.coverPage}/image?size=thumb&v=${s.coverKey}` })
+    : h('span', { class: `thumb ${status.tone ? `text-${status.tone}` : ''}`, 'aria-hidden': 'true' }, s.status === 'running' ? h('span', { class: 'spinner' }) : icon(s.status === 'failed' ? 'alert' : 'scan'));
+  return h('a', { class: 'cell indent', href: `#/scans/${s.id}`, 'aria-current': s.id === selected ? 'page' : null },
+    cover,
+    h('div', { class: 'main' },
+      h('div', { class: 'title' }, s.name),
+      h('div', { class: 'subtitle' }, s.pageCount ? `${timeLabel(s.createdAt)} · ${plural(s.pageCount, 'page')}` : timeLabel(s.createdAt)),
+      h('div', { class: `subtitle ${status.tone ? `text-${status.tone}` : ''}` }, status.text)),
+    icon('chevron-right', 'chev'));
+}
+
+/* ---------- Sheets ---------- */
+
+let openSheets = 0;
+
+function openSheet({ title, lede, body, endAction, onClose }) {
+  const layer = document.getElementById('layer');
+  const previousFocus = document.activeElement;
+  const scrim = h('div', { class: 'scrim' });
+  const closeBtn = h('button', { class: 'btn plain', type: 'button', onclick: () => close() }, endAction ? 'Cancel' : 'Done');
+  const head = h('div', { class: 'sheet-head' },
+    endAction ? closeBtn : h('span'),
+    h('h2', { id: `sheet-title-${++openSheets}` }, title),
+    h('div', { class: 'end' }, endAction || closeBtn));
+  const panel = h('div', { class: 'sheet-panel', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': `sheet-title-${openSheets}` },
+    h('div', { class: 'grabber', 'aria-hidden': 'true' }), head, lede && h('p', { class: 'sheet-lede' }, lede), body);
+  let closed = false;
+  function close() {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKey);
+    panel.classList.add('closing');
+    scrim.style.opacity = '0';
+    scrim.style.transition = 'opacity .2s';
+    setTimeout(() => { panel.remove(); scrim.remove(); }, 220);
+    if (previousFocus && previousFocus.focus) previousFocus.focus();
+    if (onClose) onClose();
+  }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  scrim.addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+  layer.append(scrim, panel);
+  const first = panel.querySelector('input, select, .segmented input:checked, button:not(.plain)');
+  (first || panel).focus({ preventScroll: true });
+  return { close, panel };
+}
+
+function confirmSheet({ title, text, confirm, destructive }) {
+  return new Promise((resolve) => {
+    let decided = false;
+    const yes = h('button', { class: `btn big ${destructive ? 'destructive' : 'primary'}`, type: 'button' }, confirm);
+    const sheet = openSheet({
+      title,
+      body: h('div', {}, h('p', { class: 'sheet-lede' }, text), yes),
+      onClose: () => { if (!decided) resolve(false); },
+    });
+    yes.addEventListener('click', () => { decided = true; resolve(true); sheet.close(); });
+  });
+}
+
+function segmented(name, options, value, onChange) {
+  return h('div', { class: 'segmented', role: 'radiogroup' },
+    options.map(([v, label]) => {
+      const id = `${name}-${v}`;
+      const input = h('input', { type: 'radio', name, id, value: v, checked: String(v) === String(value) });
+      input.addEventListener('change', () => onChange(v));
+      return [input, h('label', { for: id }, label)];
+    }));
+}
+
+function settingsFields(s, onChange, idPrefix) {
+  const set = (k) => (v) => onChange({ ...s, [k]: k === 'resolution' ? Number(v) : v });
+  return h('div', { class: 'list' },
+    h('div', { class: 'field' },
+      h('div', { class: 'field-label' }, h('span', {}, 'Resolution'), h('span', { class: 'num' }, `${s.resolution} dpi`)),
+      segmented(`${idPrefix}-res`, (state.options ? state.options.resolutions : [200, 300, 600]).map((r) => [r, String(r)]), s.resolution, set('resolution')),
+      h('div', { class: 'field-hint' }, '300 suits most paper. 600 is for photos and fine print, and is slower.')),
+    h('div', { class: 'field' },
+      h('div', { class: 'field-label' }, h('span', {}, 'Sides'), h('span', {}, SIDES[s.sides])),
+      segmented(`${idPrefix}-sides`, ['auto', 'double', 'single'].map((v) => [v, SIDES_SHORT[v]]), s.sides, set('sides')),
+      h('div', { class: 'field-hint' }, 'Auto scans both sides and hides backs that look blank. Hidden backs are kept, so you can bring them back.')),
+    h('div', { class: 'field' },
+      h('div', { class: 'field-label' }, h('span', {}, 'Color'), h('span', {}, COLORS[s.color])),
+      segmented(`${idPrefix}-color`, ['auto', 'color', 'gray', 'bw'].map((v) => [v, COLORS_SHORT[v]]), s.color, set('color')),
+      h('div', { class: 'field-hint' }, 'Auto picks color, gray or black & white for each page. You can change any page later.')));
+}
+
+function openScanSettings() {
+  const body = h('div', {});
+  const draw = (s) => body.replaceChildren(settingsFields(s, (next) => { saveScanSettings(next); draw(next); render(); }, 'scan'));
+  draw(state.scanSettings);
+  openSheet({ title: 'Scan settings', lede: 'For scans you start here. The scanner’s own button has its settings under Settings.', body });
+}
+
+/* ---------- Views ---------- */
+
+function viewHome() {
+  const st = scannerState();
+  const review = (state.scans || []).filter(needsReview);
+  return h('div', { class: 'page' },
+    h('h1', { class: 'large-title' }, 'Scanner'),
+    h('section', { class: 'scan-area' },
+      h('div', { class: 'list' }, statusCell(st)),
+      h('button', {
+        class: 'btn primary big', type: 'button', onclick: startScan,
+        disabled: !st.ready || state.starting,
+      }, icon('scan'), state.starting ? 'Starting…' : 'Scan'),
+      state.notice && h('div', { class: `notice ${state.notice.tone}`, role: 'alert', style: 'margin-top:12px' },
+        icon(state.notice.icon || 'alert'), h('p', {}, h('strong', {}, state.notice.title), state.notice.text))),
+    h('section', { class: 'group' },
+      h('div', { class: 'list' },
+        h('button', { class: 'cell', type: 'button', onclick: openScanSettings },
+          h('div', { class: 'main' }, h('div', { class: 'title' }, 'Scan settings'), h('div', { class: 'subtitle' }, summary(state.scanSettings))),
+          icon('chevron-right', 'chev'))),
+      h('p', { class: 'group-footer' }, 'You can also press the button on the scanner.')),
+    h('section', { class: 'group' },
+      h('h2', { class: 'group-header' }, 'To review'),
+      h('div', { class: 'list' },
+        state.scans === null ? h('div', { class: 'empty' }, 'Loading…')
+          : review.length ? review.map(scanRow)
+            : h('div', { class: 'empty' }, h('strong', {}, 'Nothing to review'), 'Scans wait here until you send them to Paperless.'))));
+}
+
+// Laptops show the scan list beside the open scan, like Mail or Notes.
+const sideBySide = matchMedia('(min-width: 1100px)');
+
+function viewScans(selected) {
+  const scans = state.scans;
+  const page = h('div', { class: 'page' }, h('h1', { class: 'large-title' }, 'Scans'));
+  if (scans === null) return page.appendChild(h('div', { class: 'empty' }, 'Loading…')) && page;
+  if (!scans.length) {
+    page.append(h('div', { class: 'list' }, h('div', { class: 'empty' }, h('strong', {}, 'No scans yet'), 'Put paper in the scanner and tap Scan, or press the scanner’s button.')));
+    return page;
+  }
+  const groups = new Map();
+  for (const s of scans) {
+    const label = dayLabel(s.createdAt);
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(s);
+  }
+  for (const [label, list] of groups) {
+    page.append(h('section', { class: 'group' }, h('h2', { class: 'group-header' }, label), h('div', { class: 'list' }, list.map((s) => scanRow(s, selected)))));
+  }
+  return page;
+}
+
+function documentsOf(scan) {
+  const docs = [];
+  for (const p of scan.pages) {
+    if (p.hidden) continue;
+    if (!docs.length || (scan.splits || []).includes(p.id)) docs.push([]);
+    docs[docs.length - 1].push(p);
+  }
+  return docs;
+}
+
+function tile(scan, page, label) {
+  const isNew = !state.seenPages.has(`${scan.id}/${page.id}`);
+  state.seenPages.add(`${scan.id}/${page.id}`);
+  return h('button', {
+    class: `tile${page.hidden ? ' hidden-page' : ''}${isNew && scan.status === 'running' ? ' arrived' : ''}`,
+    type: 'button', 'aria-label': `${label}${page.hidden ? ', hidden' : ''}. Open`,
+    onclick: () => openViewer(page.id),
+  }, h('span', { class: 'sheet' }, h('img', { alt: '', loading: 'lazy', src: pageImage(scan.id, page, 'thumb') })), label);
+}
+
+function sentRow(scan, sent) {
+  const done = sent.status === 'done';
+  const bad = sent.status === 'failed';
+  const text = done ? 'Filed in Paperless' : bad ? (sent.error || 'Paperless couldn’t take it') : sent.status === 'processing' ? 'Paperless is reading it…' : 'Waiting for Paperless…';
+  return h('div', { class: 'cell' },
+    h('span', { class: `sent-icon ${done ? 'done' : bad ? 'failed' : ''}` }, done ? icon('check', 'sm') : bad ? icon('alert', 'sm') : h('span', { class: 'spinner' })),
+    h('div', { class: 'main' },
+      h('div', { class: 'title' }, sent.title),
+      h('div', { class: `subtitle ${bad ? 'text-red' : ''}` }, `${plural(sent.pages.length, 'page')} · ${text}`)),
+    done && state.paperless && state.paperless.url && sent.documentId
+      ? h('a', { class: 'btn plain', href: `${state.paperless.url}/documents/${sent.documentId}/details`, target: '_blank', rel: 'noopener' }, 'Open', icon('external', 'sm'))
+      : null);
+}
+
+function viewMasterDetail() {
+  const r = state.route;
+  const detail = r.name === 'scan' ? viewScan() : h('div', { class: 'detail-empty' },
+    h('div', {}, icon('layers'), h('strong', {}, 'Choose a scan'), h('p', {}, 'Pick one from the list to check its pages and send it to Paperless.')));
+  return h('div', { class: 'master-detail' }, h('nav', { class: 'master', 'aria-label': 'Scans' }, viewScans(r.id)), h('div', { class: 'detail' }, detail));
+}
+
+function viewScan() {
+  const scan = state.scan;
+  const back = sideBySide.matches ? h('span') : h('button', { class: 'back', type: 'button', onclick: goBack }, icon('chevron-left'), 'Back');
+  if (!scan) {
+    return h('div', { class: 'page wide' }, h('div', { class: 'navbar' }, back),
+      state.scanError ? h('div', { class: 'list' }, h('div', { class: 'empty' }, h('strong', {}, 'Scan not found'), 'It may have been deleted.'))
+        : h('div', { class: 'empty' }, 'Loading…'));
+  }
+  const running = scan.status === 'running';
+  const visible = scan.pages.filter((p) => !p.hidden);
+  const hidden = scan.pages.filter((p) => p.hidden);
+  const docs = documentsOf(scan);
+
+  const page = h('div', { class: 'page wide' },
+    h('div', { class: 'navbar' }, back, h('h1', { class: 'navbar-title' }, scan.name),
+      h('div', { class: 'end' }, h('button', { class: 'btn icon-only', type: 'button', 'aria-label': 'More', onclick: () => openScanMenu(scan) }, icon('more')))),
+    h('div', { class: 'navbar-title-row' },
+      h('div', {},
+        h('h2', {}, scan.name),
+        h('p', { class: 'num' }, `${dayLabel(scan.createdAt)}, ${timeLabel(scan.createdAt)} · ${plural(visible.length, 'page')} · ${scan.settings.resolution} dpi`))));
+
+  if (running) {
+    page.append(h('div', { class: 'notice blue', role: 'status' }, h('span', { class: 'spinner' }),
+      h('p', {}, h('strong', {}, `Scanning… ${plural(scan.pagesScanned ?? visible.length, 'page')} so far`), 'Keep paper in the scanner, or wait for it to finish.')));
+  } else if (scan.status === 'failed') {
+    page.append(h('div', { class: 'notice red', role: 'alert' }, icon('alert'),
+      h('p', {}, h('strong', {}, 'Scanning stopped'), `${sentence(scan.error) || 'The scanner reported a problem.'}${scan.pages.length ? ' The pages scanned before it stopped are kept.' : ''}`)));
+    if (!scan.pages.length) {
+      page.append(h('div', { class: 'stack' },
+        h('button', { class: 'btn primary big', type: 'button', onclick: () => scanAgain(scan) }, icon('scan'), 'Scan again'),
+        h('button', { class: 'btn plain destructive', type: 'button', onclick: () => deleteScan(scan) }, 'Delete this scan')));
+      return page;
+    }
+  }
+
+  if (scan.sent && scan.sent.length) {
+    const removeAt = scan.removeAt && new Date(scan.removeAt);
+    page.append(h('section', { class: 'group' }, h('h2', { class: 'group-header' }, 'Sent to Paperless'),
+      h('div', { class: 'list' }, scan.sent.map((s) => sentRow(scan, s))),
+      removeAt && h('p', { class: 'group-footer' }, `Every page is filed, so this scan will be deleted from the scanner on ${removeAt.toLocaleDateString(undefined, { month: 'long', day: 'numeric' })}. Change this under Settings.`)));
+  }
+
+  if (state.splitDraft) {
+    page.append(splitEditor(scan, visible));
+  } else if (!visible.length && !running) {
+    page.append(h('div', { class: 'list' }, h('div', { class: 'empty' }, h('strong', {}, 'No pages'), hidden.length ? 'Every page is hidden. Show the hidden pages below to bring one back.' : 'Nothing was scanned.')));
+  } else {
+    let n = 0;
+    docs.forEach((pages, i) => {
+      page.append(h('section', { class: 'doc' },
+        docs.length > 1 && h('div', { class: 'doc-header' }, h('h3', {}, `Document ${i + 1}`),
+          h('span', { class: 'num' }, plural(pages.length, 'page'), ' · ',
+            h('a', { href: pdfURL(scan.id, pages.map((p) => p.id)), download: '', 'aria-label': `Download document ${i + 1} as PDF` }, 'PDF'))),
+        h('div', { class: 'pages' }, pages.map((p) => tile(scan, p, `Page ${++n}`)))));
+    });
+    if (running) page.append(h('div', { class: 'pages', 'aria-hidden': 'true' }, h('div', { class: 'tile placeholder' }, h('span', { class: 'sheet' }), `Page ${n + 1}`)));
+  }
+
+  if (hidden.length && !state.splitDraft) {
+    const toggle = h('button', { class: 'cell', type: 'button', 'aria-expanded': String(state.hiddenOpen), onclick: () => { state.hiddenOpen = !state.hiddenOpen; render(); } },
+      icon('eye-off'), h('div', { class: 'main' },
+        h('div', { class: 'title' }, `${plural(hidden.length, 'hidden page')}`),
+        h('div', { class: 'subtitle' }, 'Backs that looked blank. They won’t be sent unless you show them.')),
+      h('span', { class: 'value action' }, state.hiddenOpen ? 'Hide' : 'Show'));
+    page.append(h('section', { class: 'group' }, h('div', { class: 'list' }, toggle),
+      state.hiddenOpen && h('div', { class: 'pages', style: 'margin-top:16px' }, hidden.map((p) => tile(scan, p, 'Hidden')))));
+  }
+
+  if (running || scan.pages.length) page.append(actionBar(scan, visible, running));
+  return page;
+}
+
+function actionBar(scan, visible, running) {
+  if (state.splitDraft) {
+    return h('div', { class: 'actionbar' },
+      h('button', { class: 'btn', type: 'button', onclick: () => { state.splitDraft = null; render(); } }, 'Cancel'),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => saveSplits(scan) }, 'Done'));
+  }
+  const none = !visible.length || running;
+  const pdf = none
+    ? h('button', { class: 'btn', type: 'button', disabled: true }, icon('download'), 'PDF')
+    : h('a', { class: 'btn', href: pdfURL(scan.id), download: '', 'aria-label': 'Download as PDF' }, icon('download'), 'PDF');
+  const filed = new Set((scan.sent || []).filter((s) => s.status === 'done').flatMap((s) => s.pages));
+  const allFiled = visible.length > 0 && visible.every((p) => filed.has(p.id));
+  return h('div', { class: 'actionbar' },
+    h('button', { class: 'btn', type: 'button', disabled: none || visible.length < 2, onclick: () => { state.splitDraft = new Set(scan.splits || []); render(); } }, icon('scissors'), 'Split'),
+    pdf,
+    h('button', { class: `btn send${allFiled ? '' : ' primary'}`, type: 'button', disabled: none, onclick: () => openSend(scan) }, icon('send'), allFiled ? 'Send again' : 'Send'));
+}
+
+function splitEditor(scan, visible) {
+  const draft = state.splitDraft;
+  const list = h('div', { class: 'split-list' });
+  let doc = 1;
+  visible.forEach((p, i) => {
+    if (i > 0) {
+      const on = draft.has(p.id);
+      if (on) doc++;
+      list.append(h('button', {
+        class: `divider${on ? ' on' : ''}`, type: 'button', 'aria-pressed': String(on),
+        onclick: () => { on ? draft.delete(p.id) : draft.add(p.id); render(); },
+      }, on ? [icon('scissors', 'sm'), `Document ${doc} starts here`] : 'Tap to split here'));
+    }
+    list.append(h('div', { class: 'split-row' }, h('img', { alt: '', loading: 'lazy', src: pageImage(scan.id, p, 'thumb') }),
+      h('div', {}, h('div', {}, `Page ${i + 1}`), h('div', { class: 'subtitle', style: 'color:var(--label-2);font-size:15px' }, `Document ${doc}`))));
+  });
+  return h('section', { class: 'group' },
+    h('p', { class: 'group-footer', style: 'margin:0 4px 12px;font-size:15px' }, 'Tap between two pages to start a new document there. Each document goes to Paperless on its own.'),
+    list);
+}
+
+async function saveSplits(scan) {
+  const visibleIds = scan.pages.filter((p) => !p.hidden).map((p) => p.id);
+  const keepHidden = (scan.splits || []).filter((id) => !visibleIds.includes(id));
+  try {
+    state.scan = await api.updateScan(scan.id, { splits: [...keepHidden, ...visibleIds.filter((id) => state.splitDraft.has(id))] });
+    state.splitDraft = null;
+    const n = documentsOf(state.scan).length;
+    toast(n > 1 ? `Split into ${n} documents` : 'One document');
+    render();
+  } catch (e) { failed(e); }
+}
+
+function openScanMenu(scan) {
+  const rename = h('button', { class: 'cell', type: 'button' }, icon('pencil'), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Rename')));
+  const pdf = h('a', { class: 'cell', href: pdfURL(scan.id), download: '' }, icon('download'), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Download as PDF')));
+  const del = h('button', { class: 'cell destructive', type: 'button' }, icon('trash'), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Delete scan')));
+  const sheet = openSheet({ title: scan.name, body: h('div', { class: 'list' }, rename, pdf, del) });
+  rename.addEventListener('click', () => { sheet.close(); setTimeout(() => openRename(scan), 230); });
+  pdf.addEventListener('click', () => sheet.close());
+  del.addEventListener('click', () => { sheet.close(); deleteScan(scan); });
+}
+
+async function deleteScan(scan) {
+  if (scan.pages.length) {
+    const sent = scan.sent && scan.sent.length ? ' Anything already sent to Paperless stays there.' : '';
+    if (!(await confirmSheet({ title: 'Delete this scan?', text: `Its ${plural(scan.pages.length, 'page')} will be deleted from the scanner.${sent}`, confirm: 'Delete scan', destructive: true }))) return;
+  }
+  try {
+    await api.deleteScan(scan.id);
+    toast('Scan deleted');
+    location.hash = '#/scans';
+  } catch (e) { failed(e); }
+}
+
+// Retries a scan that stopped before any page came out, with the same
+// settings, and drops the empty one.
+async function scanAgain(scan) {
+  try {
+    const { jobId } = await api.startScan(scan.settings);
+    api.deleteScan(scan.id).catch(() => {});
+    location.hash = `#/scans/${jobId}`;
+  } catch (e) {
+    toast(e.code === 'no_paper' ? 'Put paper in the scanner first' : e.code === 'scanner_unavailable' ? 'The scanner is off. Press its power button.' : e.message);
+  }
+}
+
+function openRename(scan) {
+  const input = h('input', { type: 'text', value: scan.name, 'aria-label': 'Name', enterkeyhint: 'done' });
+  const save = h('button', { class: 'btn plain', type: 'button', style: 'font-weight:600' }, 'Save');
+  const sheet = openSheet({ title: 'Rename', body: input, endAction: save });
+  const submit = async () => {
+    const name = input.value.trim();
+    if (!name) return;
+    try { state.scan = await api.updateScan(scan.id, { name }); sheet.close(); render(); } catch (e) { failed(e); }
   };
+  save.addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  input.select();
+}
 
-  const el = (id) => document.getElementById(id);
-  const pageModal = () => bootstrap.Modal.getOrCreateInstance(el('page-modal'));
+/* ---------- Send to Paperless ---------- */
 
-  // Wraps an async action with a full-screen busy spinner, so long-running
-  // operations (rotate/crop/export/combine all round-trip through real
-  // image processing server-side) give visible feedback instead of looking
-  // like nothing happened. Nests safely via a depth counter in case one
-  // busy action is ever triggered from within another.
-  async function withBusy(fn) {
-    state.busyDepth++;
-    el('busy-overlay').classList.remove('d-none');
+async function openSend(scan) {
+  const docs = documentsOf(scan);
+  if (!state.paperless) { try { state.paperless = await api.paperless(); } catch (e) { failed(e); return; } }
+  if (!state.paperless.configured) {
+    openSheet({
+      title: 'Paperless isn’t connected',
+      body: h('div', {},
+        h('p', { class: 'sheet-lede' }, 'Ask whoever set up the scanner to add the Paperless address and API token. Until then you can download the scan as a PDF.'),
+        h('a', { class: 'btn big', href: pdfURL(scan.id), download: '' }, icon('download'), 'Download PDF')),
+    });
+    return;
+  }
+
+  const body = h('div', {}, h('div', { class: 'empty' }, h('span', { class: 'spinner', style: 'display:inline-block' }), h('div', {}, 'Getting tags and correspondents from Paperless…')));
+  const send = h('button', { class: 'btn plain', type: 'button', style: 'font-weight:600', disabled: true }, 'Send');
+  const sheet = openSheet({
+    title: docs.length > 1 ? `Send ${docs.length} documents` : 'Send to Paperless',
+    lede: 'Anything you leave blank, Paperless fills in with its own rules.',
+    body, endAction: send,
+  });
+
+  let meta;
+  try { meta = await api.paperlessMetadata(); } catch (e) {
+    body.replaceChildren(h('div', { class: 'notice red' }, icon('alert'), h('p', {}, h('strong', {}, 'Can’t reach Paperless'), e.message)),
+      h('a', { class: 'btn big', href: pdfURL(scan.id), download: '' }, icon('download'), 'Download PDF instead'));
+    return;
+  }
+
+  const forms = docs.map((pages, i) => documentForm(scan, pages, i, docs.length, meta));
+  body.replaceChildren(...forms.map((f) => f.el),
+    h('button', { class: 'btn primary big', type: 'button', onclick: submit }, icon('send'), docs.length > 1 ? `Send ${docs.length} documents` : 'Send'));
+  send.disabled = false;
+  send.addEventListener('click', submit);
+
+  let sending = false;
+  async function submit() {
+    if (sending) return;
+    sending = true;
+    send.disabled = true;
     try {
-      return await fn();
-    } finally {
-      state.busyDepth--;
-      if (state.busyDepth <= 0) {
-        state.busyDepth = 0;
-        el('busy-overlay').classList.add('d-none');
-      }
-    }
-  }
-
-  // translateErrorCode maps the backend's stable error `code` to a
-  // translated, user-facing message; the raw `message` (often untranslatable
-  // SCSI/USB/subprocess prose) is only ever logged to the console, never
-  // shown in the UI.
-  function translateErrorCode(code) {
-    if (!code) return I18N.t('errors.generic');
-    const key = `errors.${code}`;
-    const value = I18N.t(key);
-    return value === key ? I18N.t('errors.generic') : value;
-  }
-
-  async function api(path, opts) {
-    const res = await fetch(path, opts);
-    if (!res.ok && res.headers.get('content-type')?.includes('application/json')) {
-      const body = await res.json().catch(() => null);
-      const code = body?.error?.code;
-      if (body?.error?.message) console.warn(`API error (${code || 'unknown'}): ${body.error.message}`);
-      throw new Error(translateErrorCode(code));
-    }
-    if (!res.ok) {
-      console.warn(`API error: request failed (${res.status})`);
-      throw new Error(I18N.t('errors.generic'));
-    }
-    return res;
-  }
-
-  function combineKey(jobId, page) {
-    return `${jobId}|${page}`;
-  }
-
-  function pageImageUrl(jobId, page) {
-    const params = new URLSearchParams({ v: state.renderNonce });
-    return `/api/scans/${jobId}/pages/${page}?${params}`;
-  }
-
-  // ---- Scanner connection status ----
-
-  // updateStartButtonState keeps "Start scan" disabled whenever the
-  // scanner isn't reachable, in addition to the existing disable while a
-  // scan is already running — either condition alone should block it.
-  function updateStartButtonState() {
-    const btn = el('start-scan-btn');
-    btn.disabled = !state.scannerConnected || state.scanning;
-    if (state.scanning) {
-      btn.title = I18N.t('scan.inProgressTitle');
-    } else if (!state.scannerConnected) {
-      btn.title = I18N.t('scan.waitingTitle');
-    } else {
-      btn.title = '';
-    }
-  }
-
-  async function pollScannerStatus() {
-    const badge = el('scanner-badge');
-    try {
-      const res = await api('/api/scanner/status');
-      const data = await res.json();
-      state.scannerConnected = data.connected;
-      if (data.connected) {
-        badge.textContent = I18N.t('status.connected');
-        badge.className = 'badge rounded-pill text-bg-success';
-        badge.title = '';
-      } else {
-        badge.textContent = I18N.t('status.notConnected');
-        badge.className = 'badge rounded-pill text-bg-danger';
-        if (data.error?.message) console.warn(`Scanner status error (${data.error.code || 'unknown'}): ${data.error.message}`);
-        badge.title = data.error ? translateErrorCode(data.error.code) : '';
-      }
+      state.scan = await api.send(scan.id, forms.map((f) => f.value()));
+      sheet.close();
+      const bad = state.scan.sent.slice(-forms.length).filter((s) => s.status === 'failed').length;
+      toast(bad ? `${bad} couldn’t be sent` : docs.length > 1 ? `Sent ${docs.length} documents` : 'Sent to Paperless');
+      render();
     } catch (e) {
-      state.scannerConnected = false;
-      badge.textContent = I18N.t('status.unknown');
-      badge.className = 'badge rounded-pill text-bg-secondary';
-    }
-    updateStartButtonState();
-  }
-
-  // ---- Scan jobs ----
-
-  async function loadJobs() {
-    const res = await api('/api/scans');
-    state.jobs = await res.json();
-    renderJobList();
-  }
-
-  function renderJobList() {
-    const list = el('job-list');
-    list.innerHTML = '';
-    if (state.jobs.length === 0) {
-      list.innerHTML = `<div class="list-group-item text-muted">${I18N.t('jobs.empty')}</div>`;
-      return;
-    }
-    for (const job of state.jobs) {
-      const isActive = job.id === state.selectedJobId;
-      const item = document.createElement('button');
-      item.type = 'button';
-      item.className = 'list-group-item list-group-item-action d-flex justify-content-between align-items-start';
-      if (isActive) {
-        item.classList.add('active');
-        item.setAttribute('aria-current', 'true');
-      }
-      const when = new Date(job.createdAt).toLocaleString();
-      const statusText = I18N.t(`status.${job.status}`);
-      item.innerHTML = `
-        <span>
-          <div>${escapeHtml(job.name)}</div>
-          <small class="job-meta ${isActive ? '' : 'text-muted'}">${escapeHtml(when)} · ${job.pageCount} ${I18N.t('jobs.pageCountUnit')} · ${escapeHtml(statusText)}</small>
-        </span>
-      `;
-      item.addEventListener('click', () => selectJob(job.id));
-      list.appendChild(item);
+      failed(e);
+      sending = false;
+      send.disabled = false;
     }
   }
+}
 
-  async function selectJob(jobId) {
-    state.selectedJobId = jobId;
-    state.renderNonce++;
-    const res = await api(`/api/scans/${jobId}`);
-    state.selectedJob = await res.json();
-    renderJobList();
-    renderJobDetail();
+function documentForm(scan, pages, i, total, meta) {
+  const placeholder = total > 1 ? `${scan.name} (${i + 1} of ${total})` : scan.name;
+  const title = h('input', { type: 'text', placeholder, 'aria-label': 'Title' });
+  const date = h('input', { type: 'date', 'aria-label': 'Date on the document' });
+  const choose = (label, items) => h('select', { 'aria-label': label },
+    h('option', { value: '' }, 'Let Paperless decide'), items.map((it) => h('option', { value: it.id }, it.name)));
+  const correspondent = choose('Correspondent', meta.correspondents);
+  const docType = choose('Document type', meta.documentTypes);
+  const picked = new Set();
+  const filter = h('input', { type: 'text', placeholder: 'Find a tag', 'aria-label': 'Find a tag', style: 'margin-bottom:10px' });
+  const chips = h('div', { class: 'chips' });
+  const drawChips = () => {
+    const q = filter.value.trim().toLowerCase();
+    chips.replaceChildren(...meta.tags.filter((t) => picked.has(t.id) || !q || t.name.toLowerCase().includes(q)).slice(0, 40).map((t) =>
+      h('button', { class: 'chip', type: 'button', 'aria-pressed': String(picked.has(t.id)), onclick: () => { picked.has(t.id) ? picked.delete(t.id) : picked.add(t.id); drawChips(); } },
+        picked.has(t.id) && icon('check', 'sm'), t.name)));
+  };
+  filter.addEventListener('input', drawChips);
+  drawChips();
+  const field = (label, control, hint) => h('div', { class: 'field' }, h('div', { class: 'field-label' }, label), control, hint && h('div', { class: 'field-hint' }, hint));
+
+  const el = h('div', { class: 'doc-form' },
+    h('div', { class: 'doc-form-head' }, h('img', { alt: '', src: pageImage(scan.id, pages[0], 'thumb') }),
+      h('div', {}, h('strong', {}, total > 1 ? `Document ${i + 1}` : 'Document'), h('span', { class: 'num' }, plural(pages.length, 'page')))),
+    field('Title', title),
+    field('Date', date, 'Leave blank to use the date Paperless finds on the page.'),
+    field('Correspondent', correspondent),
+    field('Document type', docType),
+    meta.tags.length ? field('Tags', h('div', {}, meta.tags.length > 12 ? filter : null, chips)) : null);
+
+  return {
+    el,
+    value: () => ({
+      pages: pages.map((p) => p.id),
+      title: title.value.trim() || placeholder,
+      created: date.value,
+      correspondent: Number(correspondent.value) || 0,
+      documentType: Number(docType.value) || 0,
+      tags: [...picked],
+    }),
+  };
+}
+
+/* ---------- Page viewer ---------- */
+
+let viewer = null;
+
+// The viewer pages through visible pages, numbered as in the grid, or
+// through the hidden ones when it was opened on a hidden page.
+function viewerPages() {
+  if (!state.scan) return [];
+  const current = state.scan.pages.find((p) => p.id === viewer.pageId);
+  const hidden = Boolean(current && current.hidden);
+  return state.scan.pages.filter((p) => Boolean(p.hidden) === hidden);
+}
+
+function openViewer(pageId) {
+  viewer = { pageId, mode: 'view', loading: false };
+  document.addEventListener('keydown', viewerKeys);
+  drawViewer();
+}
+
+function closeViewer() {
+  if (viewer && viewer.cropper) viewer.cropper.destroy();
+  viewer = null;
+  document.removeEventListener('keydown', viewerKeys);
+  const el = document.querySelector('.viewer');
+  if (el) el.remove();
+}
+
+function viewerKeys(e) {
+  if (!viewer || document.querySelector('.sheet-panel')) return;
+  if (e.key === 'Escape') closeViewer();
+  if (viewer.mode !== 'view') return;
+  if (e.key === 'ArrowLeft') step(-1);
+  if (e.key === 'ArrowRight') step(1);
+}
+
+function step(delta) {
+  const pages = viewerPages();
+  const i = pages.findIndex((p) => p.id === viewer.pageId);
+  const next = pages[i + delta];
+  if (!next) return;
+  viewer.pageId = next.id;
+  drawViewer();
+}
+
+function currentPage() {
+  return viewerPages().find((p) => p.id === viewer.pageId);
+}
+
+function drawViewer() {
+  const scan = state.scan;
+  const p = scan && currentPage();
+  if (!p) { closeViewer(); return; }
+  const pages = viewerPages();
+  const index = pages.indexOf(p);
+  const existing = document.querySelector('.viewer');
+
+  const img = h('img', { class: 'page-img', alt: `Page ${index + 1}`, src: pageImage(scan.id, p, 'preview') });
+  const spin = h('span', { class: 'spinner loading', hidden: true });
+  img.addEventListener('load', () => { spin.hidden = true; img.style.opacity = '1'; });
+  img.style.opacity = '0.4';
+  spin.hidden = false;
+  const stage = h('div', { class: 'viewer-stage' },
+    img, spin,
+    p.hidden && h('span', { class: 'viewer-badge' }, 'Hidden: won’t be sent'),
+    h('button', { class: 'nav-arrow prev', type: 'button', 'aria-label': 'Previous page', disabled: index === 0, onclick: () => step(-1) }, icon('chevron-left')),
+    h('button', { class: 'nav-arrow next', type: 'button', 'aria-label': 'Next page', disabled: index === pages.length - 1, onclick: () => step(1) }, icon('chevron-right')));
+  let startX = null;
+  stage.addEventListener('pointerdown', (e) => { startX = e.clientX; });
+  stage.addEventListener('pointerup', (e) => {
+    if (startX === null) return;
+    const dx = e.clientX - startX;
+    startX = null;
+    if (Math.abs(dx) > 50) step(dx < 0 ? 1 : -1);
+  });
+
+  const tool = (name, label, onclick, cls = '') => h('button', { type: 'button', class: cls, onclick }, icon(name), label);
+  const toolbar = h('div', { class: 'toolbar' },
+    tool('rotate', 'Rotate', () => editPage({ rotation: ((p.edits.rotation || 0) + 90) % 360 })),
+    tool('crop', 'Crop', startCrop),
+    tool('sliders', 'Adjust', openAdjust),
+    tool(p.hidden ? 'eye' : 'eye-off', p.hidden ? 'Show' : 'Hide', () => toggleHidden(p, pages, index)),
+    tool('more', 'More', openPageMenu));
+
+  const el = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Page viewer' },
+    h('div', { class: 'viewer-top' },
+      h('button', { class: 'btn plain', type: 'button', style: 'justify-self:start;font-weight:600', onclick: closeViewer }, 'Done'),
+      h('div', { class: 'count num' }, p.hidden ? (pages.length > 1 ? `Hidden page ${index + 1} of ${pages.length}` : 'Hidden page') : `Page ${index + 1} of ${pages.length}`),
+      h('span')),
+    stage, toolbar);
+  if (existing) existing.replaceWith(el); else document.getElementById('layer').append(el);
+}
+
+// Hiding or showing moves the page to the other set, so the viewer
+// moves on to its neighbor in the set being browsed.
+async function toggleHidden(p, pages, index) {
+  const neighbor = pages[index + 1] || pages[index - 1];
+  const updated = await editPage({ hidden: !p.hidden }, { redraw: false });
+  if (!updated) return;
+  toast(updated.hidden ? 'Page hidden' : 'Page will be sent');
+  if (neighbor) viewer.pageId = neighbor.id;
+  drawViewer();
+}
+
+async function editPage(patch, { redraw = true } = {}) {
+  const scan = state.scan;
+  const p = currentPage();
+  try {
+    const updated = await api.editPage(scan.id, p.id, patch);
+    const i = scan.pages.findIndex((x) => x.id === p.id);
+    scan.pages[i] = updated;
+    if (redraw) drawViewer();
+    render();
+    return updated;
+  } catch (e) { failed(e); return null; }
+}
+
+function openAdjust() {
+  const p = currentPage();
+  const e = p.edits;
+  const value = (v) => (v > 0 ? `+${v}` : String(v));
+  const range = (label, key) => {
+    const out = h('span', { class: 'num' }, value(e[key] || 0));
+    const input = h('input', { type: 'range', min: -100, max: 100, step: 5, value: e[key] || 0, 'aria-label': label });
+    input.addEventListener('input', () => { out.textContent = value(Number(input.value)); });
+    input.addEventListener('change', () => editPage({ [key]: Number(input.value) }));
+    return h('div', { class: 'field' }, h('div', { class: 'field-label' }, h('span', {}, label), out), input);
+  };
+  const color = e.color || 'color';
+  const body = h('div', {},
+    h('div', { class: 'list' },
+      h('div', { class: 'field' }, h('div', { class: 'field-label' }, 'Color'),
+        segmented('adj-color', ['color', 'gray', 'bw'].map((v) => [v, COLORS_SHORT[v]]), color, (v) => editPage({ color: v }))),
+      range('Brightness', 'brightness'),
+      range('Contrast', 'contrast')),
+    h('button', { class: 'btn big', type: 'button', style: 'margin-top:16px', onclick: async () => { await editPage({ brightness: 0, contrast: 0 }); sheet.close(); toast('Brightness and contrast reset'); } }, 'Reset brightness and contrast'));
+  const sheet = openSheet({ title: 'Adjust', lede: 'Changes never touch the original scan, so you can always undo them.', body });
+}
+
+function openPageMenu() {
+  const scan = state.scan;
+  const p = currentPage();
+  const visible = scan.pages.filter((x) => !x.hidden);
+  const isSplit = (scan.splits || []).includes(p.id);
+  const pos = scan.pages.indexOf(p);
+  const row = (name, label, sub, onclick, cls = '', disabled = false) =>
+    h('button', { class: `cell ${cls}`, type: 'button', onclick, disabled }, icon(name), h('div', { class: 'main' }, h('div', { class: 'title' }, label), sub && h('div', { class: 'subtitle' }, sub)));
+  const sheet = openSheet({
+    title: `Page ${pos + 1}`,
+    body: h('div', {},
+      h('div', { class: 'list' },
+        row('arrow-left', 'Move earlier', null, () => move(-1), '', pos === 0),
+        row('arrow-right', 'Move later', null, () => move(1), '', pos === scan.pages.length - 1),
+        !p.hidden && visible[0] !== p && row('scissors', isSplit ? 'Join with the document before' : 'Start a new document here', 'Splits this scan into separate Paperless documents.', toggleSplit)),
+      h('div', { class: 'list', style: 'margin-top:16px' },
+        h('a', { class: 'cell', href: pdfURL(scan.id, [p.id]), download: '' }, icon('download'),
+          h('div', { class: 'main' }, h('div', { class: 'title' }, 'Download this page'), h('div', { class: 'subtitle' }, 'As a PDF, with your edits.')))),
+      h('div', { class: 'list', style: 'margin-top:16px' },
+        row('trash', 'Delete page', 'Removes this page for good.', del, 'destructive'))),
+  });
+  async function move(d) {
+    const order = scan.pages.map((x) => x.id);
+    const [moved] = order.splice(pos, 1);
+    order.splice(pos + d, 0, moved);
+    try { state.scan = await api.reorder(scan.id, order); sheet.close(); drawViewer(); render(); } catch (e) { failed(e); }
   }
-
-  function renderJobDetail() {
-    const job = state.selectedJob;
-    if (!job) {
-      el('job-detail-empty').classList.remove('d-none');
-      el('job-detail').classList.add('d-none');
-      return;
-    }
-    el('job-detail-empty').classList.add('d-none');
-    el('job-detail').classList.remove('d-none');
-    el('job-name-input').value = job.name;
-
-    const grid = el('page-grid');
-    grid.innerHTML = '';
-    const pages = job.pages || [];
-    if (pages.length === 0) {
-      grid.innerHTML = `<p class="text-muted">${I18N.t('jobDetail.noPages')}</p>`;
-      return;
-    }
-    for (const page of pages) {
-      grid.appendChild(renderPageThumbnail(job.id, page));
-    }
+  async function toggleSplit() {
+    const splits = new Set(scan.splits || []);
+    isSplit ? splits.delete(p.id) : splits.add(p.id);
+    try { state.scan = await api.updateScan(scan.id, { splits: [...splits] }); sheet.close(); render(); toast(isSplit ? 'Joined' : 'New document starts here'); } catch (e) { failed(e); }
   }
-
-  // renderPageThumbnail renders one thumbnail per page. Duplex scanning
-  // produces two independent pages per physical sheet (see
-  // storage.PageMeta) — there's nothing special about a "back" page here,
-  // it's just the next page in the list, same as any other.
-  function renderPageThumbnail(jobId, page) {
-    const thumbnail = document.createElement('div');
-    thumbnail.className = 'page-thumbnail';
-    thumbnail.draggable = true;
-    thumbnail.dataset.page = page.index;
-
-    const key = combineKey(jobId, page.index);
-    const selected = state.combineSelection.has(key);
-    const src = pageImageUrl(jobId, page.index);
-    const label = I18N.t('page.label', { n: page.index });
-
-    thumbnail.innerHTML = `
-      <img class="page-thumb" src="${src}" alt="${label}">
-      <div class="page-thumbnail-overlay">
-        <input type="checkbox" class="form-check-input combine-check" ${selected ? 'checked' : ''} title="${I18N.t('modal.selectForCombine')}">
-      </div>
-      <div class="page-thumbnail-footer">${label}</div>
-    `;
-
-    thumbnail.querySelector('.page-thumb').addEventListener('click', () => openPageViewer(jobId, page.index));
-    thumbnail.querySelector('.combine-check').addEventListener('change', () => {
-      toggleCombine(jobId, page.index);
-    });
-
-    thumbnail.addEventListener('dragstart', (e) => {
-      state.dragSrcIndex = page.index;
-      thumbnail.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-    });
-    thumbnail.addEventListener('dragend', () => {
-      thumbnail.classList.remove('dragging');
-      state.dragSrcIndex = null;
-      // Re-render from the authoritative state: if a drop already
-      // committed a reorder, selectJob() has (or will have) updated
-      // state.selectedJob and this reflects that; if the drag was
-      // cancelled with no drop, this simply restores the original order.
-      renderJobDetail();
-    });
-    thumbnail.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      if (state.dragSrcIndex == null || state.dragSrcIndex === page.index) return;
-      // Move the actual dragged thumbnail in the DOM, live, to exactly
-      // where it would land — what you see while dragging is what you
-      // get, no separate indicator to interpret.
-      const dragged = el('page-grid').querySelector('.page-thumbnail.dragging');
-      if (!dragged) return;
-      const rect = thumbnail.getBoundingClientRect();
-      const before = e.clientX - rect.left < rect.width / 2;
-      thumbnail.parentNode.insertBefore(dragged, before ? thumbnail : thumbnail.nextSibling);
-    });
-    thumbnail.addEventListener('drop', (e) => {
-      e.preventDefault();
-      if (state.dragSrcIndex == null) return;
-      commitReorder();
-    });
-
-    return thumbnail;
-  }
-
-  // commitReorder reads whatever order the page thumbnails are currently
-  // in (already rearranged live during dragover) and persists it — the
-  // grid itself is the source of truth for the drop, not a recomputed
-  // position.
-  function commitReorder() {
-    const jobId = state.selectedJobId;
-    const order = Array.from(el('page-grid').querySelectorAll('.page-thumbnail')).map((t) => Number(t.dataset.page));
-    withBusy(async () => {
-      await api(`/api/scans/${jobId}/pages/order`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order }),
-      });
-      await selectJob(jobId);
-    });
-  }
-
-  function toggleCombine(jobId, page) {
-    const key = combineKey(jobId, page);
-    if (state.combineSelection.has(key)) {
-      state.combineSelection.delete(key);
-      state.combineOrder = state.combineOrder.filter((k) => k !== key);
-    } else {
-      state.combineSelection.set(key, { jobId, page });
-      state.combineOrder.push(key);
-    }
-    renderJobDetail();
-    renderCombineBar();
-    if (state.viewer && state.viewer.jobId === jobId && state.viewer.page === page) {
-      el('pm-combine-check').checked = state.combineSelection.has(key);
-    }
-  }
-
-  // removeFromCombine deselects one page directly from the combine bar's
-  // thumbnail strip (rather than from wherever its page thumbnail happens
-  // to be, which might be a different scan entirely than the one
-  // currently open).
-  function removeFromCombine(key) {
-    const entry = state.combineSelection.get(key);
-    if (!entry) return;
-    toggleCombine(entry.jobId, entry.page);
-  }
-
-  function renderCombineBar() {
-    const bar = el('combine-bar');
-    const count = state.combineOrder.length;
-    el('combine-count-text').textContent = I18N.t('combine.selected', { count });
-    bar.classList.toggle('d-none', count === 0);
-
-    const thumbs = el('combine-thumbs');
-    thumbs.innerHTML = '';
-    state.combineOrder.forEach((key, i) => {
-      const entry = state.combineSelection.get(key);
-      if (entry) thumbs.appendChild(renderCombineThumb(key, entry, i + 1));
-    });
-  }
-
-  // renderCombineThumb renders one draggable, removable thumbnail in the
-  // combine bar. Dragging reorders combineOrder directly (the same
-  // live-DOM-reorder technique as the main page grid); there's no server
-  // round-trip involved, since combine order only matters at the moment
-  // "Combine into PDF" is clicked. `position` is this thumbnail's place
-  // in the combined document (1, 2, 3...), not its original page number
-  // within its source scan — two pages from different scans can both be
-  // "page 1" in their own right, so labeling by source page number was
-  // ambiguous here.
-  function renderCombineThumb(key, entry, position) {
-    const thumbnail = document.createElement('div');
-    thumbnail.className = 'combine-thumb';
-    thumbnail.draggable = true;
-    thumbnail.dataset.key = key;
-
-    const src = pageImageUrl(entry.jobId, entry.page);
-    thumbnail.innerHTML = `
-      <img src="${src}" alt="${I18N.t('combine.thumbAlt', { n: position })}">
-      <button type="button" class="combine-thumb-remove" title="${I18N.t('combine.removeTitle')}">&times;</button>
-      <div class="combine-thumb-label">${position}</div>
-    `;
-
-    thumbnail.querySelector('img').addEventListener('click', () => {
-      openPageViewer(entry.jobId, entry.page, { viewOnly: true });
-    });
-
-    thumbnail.querySelector('.combine-thumb-remove').addEventListener('click', () => {
-      removeFromCombine(key);
-    });
-
-    thumbnail.addEventListener('dragstart', (e) => {
-      state.combineDragKey = key;
-      thumbnail.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-    });
-    thumbnail.addEventListener('dragend', () => {
-      thumbnail.classList.remove('dragging');
-      state.combineDragKey = null;
-      renderCombineBar();
-    });
-    thumbnail.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      if (state.combineDragKey == null || state.combineDragKey === key) return;
-      const dragged = el('combine-thumbs').querySelector('.combine-thumb.dragging');
-      if (!dragged) return;
-      const rect = thumbnail.getBoundingClientRect();
-      const before = e.clientX - rect.left < rect.width / 2;
-      thumbnail.parentNode.insertBefore(dragged, before ? thumbnail : thumbnail.nextSibling);
-    });
-    thumbnail.addEventListener('drop', (e) => {
-      e.preventDefault();
-      if (state.combineDragKey == null) return;
-      // Commit the order directly from the live DOM arrangement — what
-      // you saw while dragging is what gets combined.
-      state.combineOrder = Array.from(el('combine-thumbs').querySelectorAll('.combine-thumb')).map((t) => t.dataset.key);
-    });
-
-    return thumbnail;
-  }
-
-  // ---- Page viewer / editor modal ----
-
-  // opts.viewOnly hides every action (rotate/crop/export/delete/combine
-  // checkbox) for a plain look-without-touching preview — used when
-  // opening from the combine bar's thumbnails, where you're reviewing a
-  // pick, not editing it.
-  function openPageViewer(jobId, pageIndex, opts = {}) {
-    state.viewer = { jobId, page: pageIndex };
-    loadViewerImage();
-    el('page-modal-view-actions').classList.toggle('d-none', !!opts.viewOnly);
-    pageModal().show();
-  }
-
-  function loadViewerImage() {
-    const { jobId, page } = state.viewer;
-    el('page-modal-image').src = pageImageUrl(jobId, page);
-    el('page-modal-title').textContent = I18N.t('page.label', { n: page });
-    el('pm-combine-check').checked = state.combineSelection.has(combineKey(jobId, page));
-  }
-
-  async function rotateCurrentPage(degrees) {
-    const { jobId, page } = state.viewer;
-    await withBusy(async () => {
-      await api(`/api/scans/${jobId}/pages/${page}/rotate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ degrees }),
-      });
-      await selectJob(jobId);
-      loadViewerImage();
-    });
-  }
-
-  function startCrop() {
-    const img = el('page-modal-image');
-    el('page-modal-view-actions').classList.add('d-none');
-    el('page-modal-crop-actions').classList.remove('d-none');
-    // Cropper.js reads the image's *current* rendered box size (still
-    // bounded by the same max-height the plain viewer uses) and builds its
-    // interactive canvas to match — so the modal never grows and the
-    // action buttons stay in place. Do not relax any size constraint here.
-    state.cropper = new Cropper(img, { viewMode: 1, autoCropArea: 1 });
-  }
-
-  function endCropUI() {
-    if (state.cropper) {
-      state.cropper.destroy();
-      state.cropper = null;
-    }
-    el('page-modal-view-actions').classList.remove('d-none');
-    el('page-modal-crop-actions').classList.add('d-none');
-  }
-
-  function cancelCrop() {
-    endCropUI();
-    loadViewerImage();
-  }
-
-  async function saveCrop() {
-    if (!state.cropper || !state.viewer) return;
-    const data = state.cropper.getData(true);
-    const { jobId, page } = state.viewer;
-    await withBusy(async () => {
-      await api(`/api/scans/${jobId}/pages/${page}/crop`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ x: data.x, y: data.y, width: data.width, height: data.height }),
-      });
-      endCropUI();
-      await selectJob(jobId);
-      loadViewerImage();
-    });
-  }
-
-  // ---- OCR ----
-
-  // Swaps the image view for a plain-text result view (same show-one-
-  // hide-the-other pattern startCrop/endCropUI already use for the crop
-  // UI), runs the extraction, and fills the textarea with the result.
-  async function startOcr() {
-    if (!state.viewer) return;
-    const { jobId, page } = state.viewer;
-    el('page-modal-view-actions').classList.add('d-none');
-    el('page-modal-image-wrap').classList.add('d-none');
-    el('page-modal-ocr-wrap').classList.remove('d-none');
-    el('page-modal-ocr-actions').classList.remove('d-none');
-    el('pm-ocr-text').value = '';
-    el('pm-ocr-hint').textContent = I18N.t('modal.ocrExtracting');
-
-    await withBusy(async () => {
-      try {
-        const res = await api(`/api/scans/${jobId}/pages/${page}/ocr`);
-        const { text } = await res.json();
-        el('pm-ocr-text').value = text || '';
-        el('pm-ocr-hint').textContent = text ? '' : I18N.t('modal.ocrNoText');
-      } catch (e) {
-        el('pm-ocr-hint').textContent = e.message;
-      }
-    });
-  }
-
-  function endOcrUI() {
-    el('page-modal-view-actions').classList.remove('d-none');
-    el('page-modal-image-wrap').classList.remove('d-none');
-    el('page-modal-ocr-wrap').classList.add('d-none');
-    el('page-modal-ocr-actions').classList.add('d-none');
-  }
-
-  // Tries the Clipboard API first, but that's only available in a
-  // secure context (HTTPS or localhost) — this app is typically reached
-  // over plain HTTP on a home LAN, where navigator.clipboard is simply
-  // undefined. textarea.select() has no such restriction and always
-  // works, so it's the fallback rather than an error message.
-  async function copyOcrText() {
-    const textarea = el('pm-ocr-text');
-    const btn = el('pm-ocr-copy');
-    const originalLabel = btn.textContent;
-
-    if (navigator.clipboard) {
-      try {
-        await navigator.clipboard.writeText(textarea.value);
-        btn.textContent = I18N.t('modal.ocrCopied');
-      } catch (e) {
-        textarea.select();
-        btn.textContent = I18N.t('modal.ocrSelected');
-      }
-    } else {
-      textarea.select();
-      btn.textContent = I18N.t('modal.ocrSelected');
-    }
-    setTimeout(() => { btn.textContent = originalLabel; }, 1500);
-  }
-
-  async function deleteCurrentPage() {
-    if (!state.viewer) return;
-    const { jobId, page } = state.viewer;
-    if (!confirm(I18N.t('confirm.deletePage'))) return;
-    await withBusy(async () => {
-      await api(`/api/scans/${jobId}/pages/${page}`, { method: 'DELETE' });
-      const key = combineKey(jobId, page);
-      state.combineSelection.delete(key);
-      state.combineOrder = state.combineOrder.filter((k) => k !== key);
-      renderCombineBar();
-      pageModal().hide();
-      await selectJob(jobId);
-      await loadJobs();
-    });
-  }
-
-  // ---- Export / combine ----
-
-  async function downloadCombinedPDF(pages, title, imageFormat) {
-    await withBusy(async () => {
-      const res = await api('/api/export/combine', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pages, title, imageFormat }),
-      });
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${title}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    });
-  }
-
-  async function combineSelected() {
-    const pages = state.combineOrder
-      .map((key) => state.combineSelection.get(key))
-      .filter(Boolean)
-      .map((p) => ({ jobId: p.jobId, page: p.page }));
-    const title = el('combine-title').value.trim() || 'combined';
-    await downloadCombinedPDF(pages, title, el('combine-format').value);
-  }
-
-  async function exportWholeScan() {
-    const job = state.selectedJob;
-    if (!job || !job.pages || job.pages.length === 0) {
-      alert(I18N.t('alert.noPages'));
-      return;
-    }
-    const pages = job.pages.map((p) => ({ jobId: job.id, page: p.index }));
-    await downloadCombinedPDF(pages, job.name, el('job-export-format').value);
-  }
-
-  // ---- Start scan + progress polling ----
-
-  async function startScan() {
-    const duplex = el('duplex-toggle').checked;
-    state.scanning = true;
-    updateStartButtonState();
+  async function del() {
+    sheet.close();
+    if (!(await confirmSheet({ title: 'Delete this page?', text: 'It will be removed from this scan. This can’t be undone.', confirm: 'Delete page', destructive: true }))) return;
     try {
-      const res = await api('/api/scans', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ duplex }),
-      });
-      const data = await res.json();
-      watchScanProgress(data.jobId);
-    } catch (e) {
-      alert(e.message);
-      state.scanning = false;
-      updateStartButtonState();
+      const nextId = (scan.pages[pos + 1] || scan.pages[pos - 1] || {}).id;
+      await api.deletePage(scan.id, p.id);
+      state.scan = await api.scan(scan.id);
+      if (nextId) { viewer.pageId = nextId; drawViewer(); } else closeViewer();
+      render();
+      toast('Page deleted');
+    } catch (e) { failed(e); }
+  }
+}
+
+function startCrop() {
+  const scan = state.scan;
+  const p = currentPage();
+  const rot = p.edits.rotation || 0;
+  const fullW = rot === 90 || rot === 270 ? p.heightPx : p.widthPx;
+  const fullH = rot === 90 || rot === 270 ? p.widthPx : p.heightPx;
+  const img = h('img', { alt: 'Page to crop', src: pageImage(scan.id, p, 'preview', { uncropped: true }) });
+  const stage = h('div', { class: 'viewer-stage' }, h('div', { class: 'crop-stage' }, img));
+  const done = h('button', { type: 'button' }, icon('check'), 'Done');
+  const reset = h('button', { type: 'button' }, icon('x'), 'No crop');
+  const cancel = h('button', { type: 'button' }, icon('chevron-left'), 'Cancel');
+  const el = document.querySelector('.viewer');
+  el.querySelector('.viewer-stage').replaceWith(stage);
+  el.querySelector('.toolbar').replaceChildren(cancel, reset, done);
+  viewer.mode = 'crop';
+
+  img.addEventListener('load', () => {
+    const scale = img.naturalWidth / fullW;
+    viewer.cropper = new window.Cropper(img, {
+      viewMode: 1, autoCropArea: 1, background: false, zoomable: false, movable: false, rotatable: false, scalable: false,
+      ready() {
+        const c = p.edits.crop;
+        if (c) this.cropper.setData({ x: c.x * scale, y: c.y * scale, width: c.w * scale, height: c.h * scale });
+      },
+    });
+    viewer.cropScale = scale;
+  }, { once: true });
+
+  const leave = () => { viewer.cropper && viewer.cropper.destroy(); viewer.cropper = null; viewer.mode = 'view'; drawViewer(); };
+  cancel.addEventListener('click', leave);
+  reset.addEventListener('click', async () => { viewer.mode = 'view'; viewer.cropper && viewer.cropper.destroy(); viewer.cropper = null; await editPage({ crop: null }); });
+  done.addEventListener('click', async () => {
+    if (!viewer.cropper) return;
+    const d = viewer.cropper.getData(true);
+    const s = viewer.cropScale;
+    const x = Math.max(0, Math.round(d.x / s));
+    const y = Math.max(0, Math.round(d.y / s));
+    const crop = { x, y, w: Math.min(fullW - x, Math.round(d.width / s)), h: Math.min(fullH - y, Math.round(d.height / s)) };
+    viewer.cropper.destroy();
+    viewer.cropper = null;
+    viewer.mode = 'view';
+    const whole = crop.x === 0 && crop.y === 0 && crop.w >= fullW - 2 && crop.h >= fullH - 2;
+    await editPage({ crop: whole ? null : crop });
+  });
+}
+
+/* ---------- Settings ---------- */
+
+function viewSettings() {
+  const page = h('div', { class: 'page' }, h('h1', { class: 'large-title' }, 'Settings'));
+  const app = state.appSettings;
+  const save = async (next) => {
+    state.appSettings = next;
+    render();
+    try { state.appSettings = await api.saveSettings(next); toast('Saved'); } catch (e) { failed(e); }
+  };
+  const buttonGroup = h('section', { class: 'group' }, h('h2', { class: 'group-header' }, 'The scanner’s button'));
+  if (app) {
+    buttonGroup.append(settingsFields(app.buttonScan, (next) => save({ ...app, buttonScan: next }), 'button'),
+      h('p', { class: 'group-footer' }, 'Used when someone presses the button on the scanner. Those scans wait under To review until someone sends them.'));
+  } else buttonGroup.append(h('div', { class: 'list' }, h('div', { class: 'empty' }, 'Loading…')));
+  page.append(buttonGroup);
+
+  if (app) {
+    const keep = [[0, 'Forever'], [1, '1 day'], [7, '7 days'], [30, '30 days']];
+    page.append(h('section', { class: 'group' }, h('h2', { class: 'group-header' }, 'Keep filed scans'),
+      h('div', { class: 'list' }, h('div', { class: 'field' },
+        segmented('keep', keep, app.retentionDays, (v) => save({ ...app, retentionDays: Number(v) })))),
+      h('p', { class: 'group-footer' }, 'Once Paperless has filed every page of a scan, the scanner deletes its copy after this long. Scans you haven’t sent are never deleted.')));
+  }
+
+  const pl = state.paperless;
+  let plCell;
+  if (!pl) plCell = h('div', { class: 'cell' }, h('span', { class: 'spinner' }), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Checking Paperless…')));
+  else if (!pl.configured) plCell = h('div', { class: 'cell' }, h('span', { class: 'dot' }), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Not set up'), h('div', { class: 'subtitle' }, 'Scans can be downloaded as PDFs until Paperless is connected.')));
+  else if (pl.connected) plCell = h('a', { class: 'cell', href: pl.url, target: '_blank', rel: 'noopener' }, h('span', { class: 'dot green' }), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Connected'), h('div', { class: 'subtitle' }, pl.url)), icon('external', 'chev'));
+  else plCell = h('div', { class: 'cell' }, h('span', { class: 'dot red' }), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Can’t connect'), h('div', { class: 'subtitle' }, pl.error || pl.url)));
+  page.append(h('section', { class: 'group' }, h('h2', { class: 'group-header' }, 'Paperless'), h('div', { class: 'list' }, plCell),
+    pl && !pl.configured && h('p', { class: 'group-footer' }, 'To connect, whoever runs the scanner sets DOXIE_PAPERLESS_URL and DOXIE_PAPERLESS_TOKEN and restarts it.')));
+
+  const st = scannerState();
+  page.append(h('section', { class: 'group' }, h('h2', { class: 'group-header' }, 'Scanner'),
+    h('div', { class: 'list' },
+      statusCell(st),
+      h('div', { class: 'cell' }, h('div', { class: 'main' }, h('div', { class: 'title' }, 'Model')), h('span', { class: 'value' }, 'Doxie Pro DX400')),
+      h('div', { class: 'cell' }, h('div', { class: 'main' }, h('div', { class: 'title' }, 'App version')), h('span', { class: 'value num' }, state.version || '…')))));
+  return page;
+}
+
+/* ---------- Actions ---------- */
+
+async function startScan() {
+  state.starting = true;
+  state.notice = null;
+  render();
+  try {
+    const { jobId } = await api.startScan(state.scanSettings);
+    state.starting = false;
+    location.hash = `#/scans/${jobId}`;
+  } catch (e) {
+    state.starting = false;
+    if (e.code === 'no_paper') state.notice = { tone: 'orange', title: 'No paper', text: 'Put paper in the scanner, then tap Scan.' };
+    else if (e.code === 'scanner_unavailable') state.notice = { tone: 'orange', icon: 'power', title: 'The scanner is off', text: 'Press its power button, wait a few seconds, then tap Scan.' };
+    else if (e.status === 409 && e.code !== 'no_paper') state.notice = { tone: 'blue', title: 'Already scanning', text: 'Wait for the current scan to finish.' };
+    else state.notice = { tone: 'red', title: 'Couldn’t start the scan', text: e.message };
+    render();
+  }
+}
+
+function goBack() {
+  if (history.length > 1 && document.referrer !== '' ) history.back();
+  else location.hash = '#/scans';
+}
+
+/* ---------- Routing and rendering ---------- */
+
+function parseRoute() {
+  const hash = location.hash || '#/';
+  if (hash === '#/' || hash === '#') return { name: 'home' };
+  if (hash === '#/scans') return { name: 'scans' };
+  if (hash === '#/settings') return { name: 'settings' };
+  const m = hash.match(/^#\/scans\/([\w-]+)$/);
+  if (m) return { name: 'scan', id: m[1] };
+  return null;
+}
+
+let lastSignature = '';
+
+function render(force = true) {
+  const view = document.getElementById('view');
+  const r = state.route;
+  const split = sideBySide.matches && (r.name === 'scans' || r.name === 'scan');
+  const node = split ? viewMasterDetail() : r.name === 'home' ? viewHome() : r.name === 'scans' ? viewScans() : r.name === 'settings' ? viewSettings() : viewScan();
+  view.classList.toggle('flush', split);
+  const sig = node.outerHTML;
+  if (!force && sig === lastSignature) return;
+  lastSignature = sig;
+  view.replaceChildren(node);
+  watchTitle(node);
+}
+
+// The bar title appears once the large title has scrolled out of view.
+let titleObserver;
+function watchTitle(node) {
+  if (titleObserver) titleObserver.disconnect();
+  const bar = node.querySelector('.navbar');
+  const big = node.querySelector('.navbar-title-row h2');
+  if (!bar || !big) return;
+  titleObserver = new IntersectionObserver(([entry]) => bar.classList.toggle('scrolled', !entry.isIntersecting), { rootMargin: '-52px 0px 0px 0px' });
+  titleObserver.observe(big);
+}
+
+async function onRoute() {
+  const r = parseRoute();
+  if (!r) { location.replace('#/'); return; }
+  const changed = r.name !== state.route.name || r.id !== state.route.id;
+  state.route = r;
+  if (changed) {
+    closeViewer();
+    state.splitDraft = null;
+    state.hiddenOpen = false;
+    state.notice = null;
+    if (r.name === 'scan') { state.scan = null; state.scanError = null; }
+    window.scrollTo(0, 0);
+  }
+  const tab = r.name === 'scan' ? 'scans' : r.name;
+  document.querySelectorAll('.tabbar a').forEach((a) => {
+    if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  });
+  render();
+  await refresh();
+  if (changed) document.getElementById('view').focus({ preventScroll: true });
+}
+
+async function refresh() {
+  const r = state.route;
+  try {
+    if (r.name === 'home' || r.name === 'scans' || (r.name === 'scan' && sideBySide.matches)) state.scans = await api.scans();
+    if (r.name === 'scan') {
+      try { state.scan = await api.scan(r.id); } catch (e) { if (e.status === 404) state.scanError = e; else throw e; }
     }
-  }
+    if (r.name === 'settings') {
+      const [settings, version] = await Promise.all([api.settings(), api.version()]);
+      state.appSettings = settings;
+      state.version = version.version;
+      api.paperless().then((p) => { state.paperless = p; render(false); }).catch(() => {});
+    }
+  } catch (e) { failed(e); }
+  render(false);
+}
 
-  function updateScanProgressText(count) {
-    el('scan-progress').textContent = I18N.t('scan.progressText', { count });
-  }
+/* ---------- Polling ---------- */
 
-  function watchScanProgress(jobId) {
-    el('scan-progress').classList.remove('d-none');
-    updateScanProgressText(0);
-    if (state.scanPollTimer) clearInterval(state.scanPollTimer);
-    state.scanPollTimer = setInterval(async () => {
-      const res = await api(`/api/scans/${jobId}`);
-      const job = await res.json();
-      updateScanProgressText(job.pagesScanned ?? job.pageCount ?? 0);
-      if (job.status !== 'running') {
-        clearInterval(state.scanPollTimer);
-        state.scanPollTimer = null;
-        el('scan-progress').classList.add('d-none');
-        state.scanning = false;
-        updateStartButtonState();
-        await loadJobs();
-        await selectJob(jobId);
+let ticks = 0;
+
+async function tick() {
+  if (document.hidden) return;
+  ticks++;
+  const r = state.route;
+  const wasBusy = state.status && state.status.busy;
+  if (ticks % 2 === 0) {
+    try { state.status = await api.status(); state.statusError = null; } catch (e) { state.statusError = e; }
+  }
+  const busy = state.status && state.status.busy;
+  try {
+    if (r.name === 'scan' && state.scan && !state.splitDraft) {
+      if (state.scan.status === 'running') {
+        state.scan = await api.scan(r.id);
+        if (viewer) drawViewer();
+      } else if (state.paperless && state.paperless.configured && ticks % 3 === 0 && (state.scan.sent || []).some((s) => s.status === 'queued' || s.status === 'processing')) {
+        state.scan = await api.refreshSent(r.id);
       }
-    }, 1000);
-  }
+    }
+    const listed = r.name === 'home' || r.name === 'scans' || (r.name === 'scan' && sideBySide.matches);
+    if (listed && (busy || wasBusy !== busy || ticks % 5 === 0)) state.scans = await api.scans();
+  } catch { /* the status cell already reports reachability */ }
+  if (!viewer && !document.querySelector('.sheet-panel')) render(false);
+}
 
-  // ---- Rename / delete job ----
+/* ---------- Start ---------- */
 
-  async function renameJob() {
-    const name = el('job-name-input').value.trim();
-    if (!name || !state.selectedJobId) return;
-    await api(`/api/scans/${state.selectedJobId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    await loadJobs();
-  }
+async function start() {
+  sideBySide.addEventListener('change', () => refresh());
+  let options = { defaults: { resolution: 300, sides: 'auto', color: 'auto' }, resolutions: [200, 300, 600] };
+  try { options = await api.options(); } catch { /* keep defaults */ }
+  state.options = options;
+  state.scanSettings = loadScanSettings(options.defaults);
+  api.paperless().then((p) => { state.paperless = p; }).catch(() => {});
+  window.addEventListener('hashchange', onRoute);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { ticks = 1; tick(); } });
+  try { state.status = await api.status(); } catch (e) { state.statusError = e; }
+  await onRoute();
+  setInterval(tick, 1000);
+}
 
-  async function deleteJob() {
-    if (!state.selectedJobId) return;
-    if (!confirm(I18N.t('confirm.deleteScan'))) return;
-    await withBusy(async () => {
-      await api(`/api/scans/${state.selectedJobId}`, { method: 'DELETE' });
-      state.selectedJobId = null;
-      state.selectedJob = null;
-      renderJobDetail();
-      await loadJobs();
-    });
-  }
-
-  function escapeHtml(s) {
-    const div = document.createElement('div');
-    div.textContent = s;
-    return div.innerHTML;
-  }
-
-  // ---- Wire up ----
-
-  el('start-scan-btn').addEventListener('click', startScan);
-  el('job-rename-btn').addEventListener('click', renameJob);
-  el('job-delete-btn').addEventListener('click', deleteJob);
-  el('job-export-pdf-btn').addEventListener('click', exportWholeScan);
-  el('combine-btn').addEventListener('click', combineSelected);
-  el('combine-clear-btn').addEventListener('click', () => {
-    state.combineSelection.clear();
-    state.combineOrder = [];
-    renderJobDetail();
-    renderCombineBar();
-  });
-
-  el('pm-rotate-left').addEventListener('click', () => rotateCurrentPage(270));
-  el('pm-rotate-right').addEventListener('click', () => rotateCurrentPage(90));
-  el('pm-crop-start').addEventListener('click', startCrop);
-  el('pm-crop-cancel').addEventListener('click', cancelCrop);
-  el('pm-crop-save').addEventListener('click', saveCrop);
-  el('pm-extract-text').addEventListener('click', startOcr);
-  el('pm-ocr-back').addEventListener('click', endOcrUI);
-  el('pm-ocr-copy').addEventListener('click', copyOcrText);
-  el('pm-delete').addEventListener('click', deleteCurrentPage);
-  el('pm-combine-check').addEventListener('change', (e) => {
-    if (!state.viewer) return;
-    const { jobId, page } = state.viewer;
-    toggleCombine(jobId, page);
-    e.target.checked = state.combineSelection.has(combineKey(jobId, page));
-  });
-  document.querySelectorAll('.pm-export-link').forEach((a) => {
-    a.addEventListener('click', (e) => {
-      e.preventDefault();
-      if (!state.viewer) return;
-      const { jobId, page } = state.viewer;
-      const params = { format: a.dataset.format };
-      if (a.dataset.quality) params.quality = a.dataset.quality;
-      const qs = new URLSearchParams(params);
-      window.open(`/api/scans/${jobId}/pages/${page}/export?${qs}`, '_blank');
-    });
-  });
-  el('page-modal').addEventListener('hidden.bs.modal', () => {
-    endCropUI();
-    endOcrUI();
-    state.viewer = null;
-  });
-
-  // Fallback for dropping into empty grid space past the last thumbnail
-  // (e.g. an incomplete last row) — wired once here rather than in
-  // renderPageThumbnail, since #page-grid itself is never recreated, only
-  // its children (renderJobDetail rebuilds those on every render).
-  const pageGrid = el('page-grid');
-  pageGrid.addEventListener('dragover', (e) => {
-    if (e.target !== pageGrid || state.dragSrcIndex == null) return;
-    e.preventDefault();
-    const dragged = pageGrid.querySelector('.page-thumbnail.dragging');
-    if (dragged) pageGrid.appendChild(dragged);
-  });
-  pageGrid.addEventListener('drop', (e) => {
-    if (e.target !== pageGrid || state.dragSrcIndex == null) return;
-    e.preventDefault();
-    commitReorder();
-  });
-
-  // Both of these render translated text on first call, so wait for the
-  // locale dictionary to be ready rather than racing it.
-  (async () => {
-    await window.I18N.ready;
-    pollScannerStatus();
-    setInterval(pollScannerStatus, 3000);
-    loadJobs();
-  })();
-})();
+start();

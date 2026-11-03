@@ -1,172 +1,100 @@
 package api
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"image"
-	"image/jpeg"
-	"image/png"
 	"net/http"
-	"strconv"
+	"regexp"
+	"strings"
 
+	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 	"github.com/andiapps-dev/doxie-scanner/internal/pdfexport"
+	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
 
-// handleExportPage exports one stored page as PNG, JPEG, or a single-page
-// PDF, with a Content-Disposition attachment header so a browser download
-// gets a sensible filename.
-func (s *Server) handleExportPage(w http.ResponseWriter, r *http.Request) {
-	jobID, _, pageMeta, filename, ok := s.resolvePageFile(w, r)
-	if !ok {
+// buildPDF assembles pages into a PDF at their physical size. Unedited
+// pages carry the scanner's JPEG byte for byte; edited ones are rendered
+// and encoded one at a time so memory stays flat on a Raspberry Pi.
+func (s *Server) buildPDF(jobID string, pages []storage.PageMeta) ([]byte, error) {
+	out := make([]pdfexport.Page, 0, len(pages))
+	for _, p := range pages {
+		dpi := float64(p.YDPI)
+		if p.Edits.IsIdentity() {
+			original, err := s.store.LoadPageFile(jobID, p.File)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, pdfexport.FromJPEG(original, float64(p.WidthPx)/dpi, float64(p.HeightPx)/dpi))
+			continue
+		}
+		err := s.withDecodedPage(jobID, p, func(img image.Image) error {
+			rendered := pageimage.Render(img, p.Edits)
+			b := rendered.Bounds()
+			page, err := pdfexport.FromImage(rendered, float64(b.Dx())/dpi, float64(b.Dy())/dpi)
+			out = append(out, page)
+			return err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("page %s: %w", p.ID, err)
+		}
+	}
+	return pdfexport.Build(out)
+}
+
+// selectPages returns the pages named in ids, in that order, or every
+// visible page when ids is empty.
+func selectPages(meta storage.JobMeta, ids []string) ([]storage.PageMeta, error) {
+	if len(ids) == 0 {
+		return meta.VisiblePages(), nil
+	}
+	pages := make([]storage.PageMeta, 0, len(ids))
+	for _, id := range ids {
+		p, _, ok := meta.FindPage(id)
+		if !ok {
+			return nil, fmt.Errorf("page %q not found", id)
+		}
+		pages = append(pages, p)
+	}
+	return pages, nil
+}
+
+var unsafeFilename = regexp.MustCompile(`[^A-Za-z0-9._ -]+`)
+
+func pdfFilename(name string) string {
+	clean := strings.TrimSpace(unsafeFilename.ReplaceAllString(name, "-"))
+	if clean == "" {
+		clean = "scan"
+	}
+	return clean + ".pdf"
+}
+
+// handleJobPDF downloads a job as a PDF: every visible page by default,
+// or ?pages=001f,002f for a specific selection and order.
+func (s *Server) handleJobPDF(w http.ResponseWriter, r *http.Request) {
+	meta, err := s.store.LoadMeta(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "job not found")
 		return
 	}
-
-	data, err := s.store.LoadPageFile(jobID, filename)
+	var ids []string
+	if q := r.URL.Query().Get("pages"); q != "" {
+		ids = strings.Split(q, ",")
+	}
+	pages, err := selectPages(meta, ids)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if len(pages) == 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "no pages to export")
+		return
+	}
+	pdf, err := s.buildPDF(meta.ID, pages)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
-	}
-
-	format := r.URL.Query().Get("format")
-	if format == "" {
-		format = "png"
-	}
-
-	base := fmt.Sprintf("%s-page-%03d", jobID, pageMeta.Index)
-
-	switch format {
-	case "png":
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", base+".png"))
-		w.Write(data)
-
-	case "jpg", "jpeg":
-		img, err := png.Decode(bytes.NewReader(data))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-			return
-		}
-		// Defaults to 100 — deliberately higher than pdfexport.JPEGQuality
-		// (90): this is the "I want the best quality" choice. The
-		// frontend's "JPEG (smaller)" option explicitly requests
-		// ?quality=90 (the same tier PDF export uses) for anyone who
-		// wants a compact JPEG without wrapping it in a PDF. Anything
-		// outside 1-100, or missing, falls back to the 100 default rather
-		// than erroring, matching how an empty "format" already defaults
-		// to png above.
-		quality := 100
-		if q, err := strconv.Atoi(r.URL.Query().Get("quality")); err == nil && q >= 1 && q <= 100 {
-			quality = q
-		}
-		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-			return
-		}
-		w.Header().Set("Content-Type", "image/jpeg")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", base+".jpg"))
-		w.Write(buf.Bytes())
-
-	case "pdf":
-		img, err := png.Decode(bytes.NewReader(data))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-			return
-		}
-		// No format choice here (unlike handleCombine): this is a single
-		// page, and anyone who wants lossless already has the plain PNG
-		// download right next to this one in the same export menu, so
-		// this PDF option can just default to the smaller JPEG embed.
-		pdfBytes, err := pdfexport.SinglePagePDF(img, pdfexport.FormatJPEG)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-			return
-		}
-		w.Header().Set("Content-Type", "application/pdf")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", base+".pdf"))
-		w.Write(pdfBytes)
-
-	default:
-		writeError(w, http.StatusBadRequest, "bad_request", "unsupported format (use png, jpg, or pdf)")
-	}
-}
-
-type combinePageRef struct {
-	JobID string `json:"jobId"`
-	Page  int    `json:"page"`
-}
-
-type combineRequest struct {
-	Pages       []combinePageRef `json:"pages"`
-	Title       string           `json:"title,omitempty"`
-	ImageFormat string           `json:"imageFormat,omitempty"`
-}
-
-// handleCombine assembles pages from any number of past jobs, in the
-// requested order, into one combined PDF.
-func (s *Server) handleCombine(w http.ResponseWriter, r *http.Request) {
-	var req combineRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
-		return
-	}
-	if len(req.Pages) == 0 {
-		writeError(w, http.StatusBadRequest, "bad_request", "no pages specified")
-		return
-	}
-
-	// Default to JPEG (smaller, no visible difference for typical text
-	// scans) — PNG is the deliberate opt-in for photo/art content where
-	// JPEG artifacts would show.
-	format := pdfexport.FormatJPEG
-	switch req.ImageFormat {
-	case "", "jpeg":
-		format = pdfexport.FormatJPEG
-	case "png":
-		format = pdfexport.FormatPNG
-	default:
-		writeError(w, http.StatusBadRequest, "bad_request", "imageFormat must be \"png\" or \"jpeg\"")
-		return
-	}
-
-	images := make([]image.Image, 0, len(req.Pages))
-	for _, ref := range req.Pages {
-		meta, err := s.store.LoadMeta(ref.JobID)
-		if err != nil {
-			writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("job %q not found", ref.JobID))
-			return
-		}
-		pageMeta, found := findPage(meta, ref.Page)
-		if !found {
-			writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("page %d not found in job %q", ref.Page, ref.JobID))
-			return
-		}
-
-		data, err := s.store.LoadPageFile(ref.JobID, pageMeta.File)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-			return
-		}
-		img, err := png.Decode(bytes.NewReader(data))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-			return
-		}
-		images = append(images, img)
-	}
-
-	pdfBytes, err := pdfexport.CombinePagesPDF(images, format)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	title := req.Title
-	if title == "" {
-		title = "combined"
 	}
 	w.Header().Set("Content-Type", "application/pdf")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", title+".pdf"))
-	w.Write(pdfBytes)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", pdfFilename(meta.Name)))
+	w.Write(pdf)
 }

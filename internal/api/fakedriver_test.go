@@ -2,65 +2,66 @@ package api
 
 import (
 	"context"
+	"errors"
+	"sync"
+	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
 )
 
-// fakeSession is a minimal scriptable driver.Session for handler tests
-// that need a running scan (StartScan drives it through scanjobs.Manager).
+// fakeSession has paper while scripted sheets remain. If block is set,
+// ScanPage waits on it, holding the job "running" until the test lets go.
 type fakeSession struct {
-	pages      []driver.Page
-	idx        int
-	hasNextErr error
-	scanErr    error
-	closeErr   error
-	closed     bool
-	// block, if non-nil, is read from (and so blocks) at the top of
-	// HasNextPage — used to hold a scan "running" indefinitely so tests
-	// can deterministically observe an in-progress job without a timing
-	// race against the goroutine finishing on its own.
+	mu    sync.Mutex
+	pages []driver.Page
+	idx   int
 	block chan struct{}
 }
 
 func (s *fakeSession) HasNextPage(ctx context.Context) (bool, error) {
-	if s.block != nil {
-		<-s.block
-	}
-	if s.hasNextErr != nil {
-		return false, s.hasNextErr
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.idx < len(s.pages), nil
 }
 
 func (s *fakeSession) ScanPage(ctx context.Context, opts driver.ScanOptions) (driver.Page, error) {
-	if s.scanErr != nil {
-		return driver.Page{}, s.scanErr
+	if s.block != nil {
+		<-s.block
+		return driver.Page{}, errors.New("released")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	p := s.pages[s.idx]
 	s.idx++
 	return p, nil
 }
 
-func (s *fakeSession) Close() error {
-	s.closed = true
-	return s.closeErr
+func (s *fakeSession) WaitForButton(ctx context.Context, timeout time.Duration) (bool, error) {
+	select {
+	case <-time.After(timeout):
+	case <-ctx.Done():
+	}
+	return false, nil
 }
 
-// fakeDriver is a scriptable driver.Driver for handler tests.
+func (s *fakeSession) Close() error { return nil }
+
+// fakeDriver hands out its one session, or openErr while the scanner is
+// "asleep".
 type fakeDriver struct {
-	info      driver.Info
-	session   *fakeSession
-	detectErr error
-	openErr   error
+	info    driver.Info
+	session *fakeSession
+	openErr error
 }
 
 func (d *fakeDriver) Info() driver.Info { return d.info }
 
-func (d *fakeDriver) Detect(ctx context.Context) error { return d.detectErr }
-
 func (d *fakeDriver) Open(ctx context.Context) (driver.Session, error) {
 	if d.openErr != nil {
 		return nil, d.openErr
+	}
+	if d.session == nil {
+		return &fakeSession{}, nil
 	}
 	return d.session, nil
 }

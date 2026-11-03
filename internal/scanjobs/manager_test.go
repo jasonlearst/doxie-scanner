@@ -1,446 +1,433 @@
 package scanjobs
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
-	"io"
+	"image/draw"
+	"image/jpeg"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
+	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
 
-func testImage(w, h int, c color.NRGBA) *image.NRGBA {
+func page(c color.Color, w, h int) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			img.Set(x, y, c)
-		}
+	draw.Draw(img, img.Bounds(), &image.Uniform{c}, image.Point{}, draw.Src)
+	return img
+}
+
+// textPage is white with black bars: black & white, not blank.
+func textPage() *image.NRGBA {
+	img := page(color.White, 300, 400)
+	for y := 10; y < 400; y += 20 {
+		draw.Draw(img, image.Rect(10, y, 290, y+6), image.Black, image.Point{}, draw.Src)
 	}
 	return img
 }
 
-func waitForJobDone(t *testing.T, m *Manager) *JobState {
+func side(t *testing.T, img image.Image) driver.Side {
 	t.Helper()
-	// Generous margin: these fakes finish almost instantly in practice, but
-	// a shared/throttled CI runner can occasionally starve the background
-	// goroutine of scheduling time for longer than a tight deadline allows,
-	// producing a flaky failure on otherwise-identical code (observed once
-	// in CI, unreproducible locally, and immediately green on retry).
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
+	return driver.Side{JPEG: buf.Bytes(), XDPI: 300, YDPI: 300}
+}
+
+func sheet(front driver.Side, back *driver.Side) driver.Page {
+	return driver.Page{Front: front, Back: back}
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	// Generous margin: a throttled CI runner can starve the manager's
+	// goroutine well past what these fakes need locally.
 	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		state := m.CurrentJob()
-		if state != nil && state.Status != storage.StatusRunning {
-			return state
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("timed out waiting for job to finish")
-	return nil
 }
 
-func newTestManager(t *testing.T, drv driver.Driver) (*Manager, *storage.Store) {
+// startManager runs a Manager with fast timings until the test ends.
+func startManager(t *testing.T, drv *fakeDriver) (*Manager, *storage.Store) {
 	t.Helper()
 	store := storage.New(t.TempDir())
 	m := NewManager(drv, store)
+	m.Timings = Timings{Reconnect: 20 * time.Millisecond, ButtonPoll: 5 * time.Millisecond, Reply: 2 * time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { m.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
 	return m, store
 }
 
-func TestManager_CurrentJob_NilBeforeAnyScan(t *testing.T) {
-	m, _ := newTestManager(t, &fakeDriver{session: &fakeSession{}})
-	if m.CurrentJob() != nil {
-		t.Error("expected nil before any scan has started")
-	}
+func finished(t *testing.T, m *Manager) *JobState {
+	t.Helper()
+	waitFor(t, "the scan to finish", func() bool { return m.CurrentJob() != nil && !m.Scanning() })
+	return m.CurrentJob()
 }
 
-func TestManager_StartScan_ZeroPages(t *testing.T) {
-	drv := &fakeDriver{info: driver.Info{Name: "doxie-dx400"}, session: &fakeSession{}}
-	m, store := newTestManager(t, drv)
-
-	id, err := m.StartScan(false)
+func scan(t *testing.T, settings storage.ScanSettings, sheets ...driver.Page) (*fakeSession, storage.JobMeta, *storage.Store) {
+	t.Helper()
+	sess := &fakeSession{pages: sheets}
+	m, store := startManager(t, &fakeDriver{info: driver.Info{Name: "doxie-dx400"}, session: sess})
+	id, err := m.StartScan(WithDefaults(settings))
 	if err != nil {
 		t.Fatalf("StartScan: %v", err)
 	}
-	state := waitForJobDone(t, m)
-	if state.Status != storage.StatusCompleted {
-		t.Errorf("status: got %v", state.Status)
+	if state := finished(t, m); state.Status != storage.StatusCompleted {
+		t.Fatalf("status %v: %v", state.Status, state.Err)
 	}
-	if state.PagesScanned != 0 {
-		t.Errorf("pagesScanned: got %d", state.PagesScanned)
-	}
-
-	meta, err := store.LoadMeta(id)
-	if err != nil {
-		t.Fatalf("LoadMeta: %v", err)
-	}
-	if meta.PageCount != 0 || meta.Status != storage.StatusCompleted {
-		t.Errorf("meta: got %+v", meta)
-	}
-	if !drv.session.closed {
-		t.Error("expected the session to be closed")
-	}
-}
-
-func TestManager_StartScan_SimplexPages(t *testing.T) {
-	page1 := driver.Page{Front: testImage(4, 4, color.NRGBA{R: 255, A: 255})}
-	page2 := driver.Page{Front: testImage(4, 4, color.NRGBA{G: 255, A: 255})}
-	drv := &fakeDriver{session: &fakeSession{pages: []driver.Page{page1, page2}}}
-	m, store := newTestManager(t, drv)
-
-	id, err := m.StartScan(false)
-	if err != nil {
-		t.Fatalf("StartScan: %v", err)
-	}
-	state := waitForJobDone(t, m)
-	if state.Status != storage.StatusCompleted {
-		t.Fatalf("status: got %v, err=%v", state.Status, state.Err)
-	}
-	if state.PagesScanned != 2 {
-		t.Errorf("pagesScanned: got %d", state.PagesScanned)
-	}
-
-	meta, err := store.LoadMeta(id)
-	if err != nil {
-		t.Fatalf("LoadMeta: %v", err)
-	}
-	if meta.PageCount != 2 {
-		t.Fatalf("pageCount: got %d", meta.PageCount)
-	}
-	for _, p := range meta.Pages {
-		data, err := store.LoadPageFile(id, p.File)
-		if err != nil {
-			t.Fatalf("LoadPageFile(%s): %v", p.File, err)
-		}
-		if len(data) == 0 {
-			t.Errorf("page %d: empty PNG data", p.Index)
-		}
-	}
-}
-
-func TestManager_StartScan_DuplexWithNonBlankBack(t *testing.T) {
-	page := driver.Page{
-		Front: testImage(4, 4, color.NRGBA{R: 255, A: 255}),
-		Back:  testImage(4, 4, color.NRGBA{B: 255, A: 255}),
-	}
-	drv := &fakeDriver{session: &fakeSession{pages: []driver.Page{page}}}
-	m, store := newTestManager(t, drv)
-
-	id, err := m.StartScan(true)
-	if err != nil {
-		t.Fatalf("StartScan: %v", err)
-	}
-	waitForJobDone(t, m)
-
 	meta, err := store.LoadMeta(id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Front and back each become their own independent page: 2 pages
-	// from 1 physical sheet, not 1 page with an attached back image.
+	return sess, meta, store
+}
+
+func TestValidateAndDefaults(t *testing.T) {
+	if got := WithDefaults(storage.ScanSettings{}); got != DefaultSettings {
+		t.Errorf("WithDefaults(empty): got %+v", got)
+	}
+	if got := WithDefaults(storage.ScanSettings{Resolution: 600, Sides: SidesSingle, Color: "gray"}); got.Resolution != 600 || got.Sides != SidesSingle || got.Color != "gray" {
+		t.Errorf("WithDefaults must keep explicit values, got %+v", got)
+	}
+	for _, bad := range []storage.ScanSettings{
+		{Resolution: 150, Sides: SidesAuto, Color: ColorAuto},
+		{Resolution: 300, Sides: "triple", Color: ColorAuto},
+		{Resolution: 300, Sides: SidesAuto, Color: "sepia"},
+	} {
+		if err := Validate(bad); err == nil {
+			t.Errorf("%+v should be rejected", bad)
+		}
+	}
+}
+
+func TestStartScan_RejectsInvalidSettingsWithoutCreatingAJob(t *testing.T) {
+	m, store := startManager(t, &fakeDriver{session: &fakeSession{}})
+	if _, err := m.StartScan(storage.ScanSettings{Resolution: 150, Sides: SidesAuto, Color: ColorAuto}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if jobs, _ := store.ListJobs(); len(jobs) != 0 {
+		t.Errorf("no job should be created, got %d", len(jobs))
+	}
+}
+
+func TestStartScan_NoPaperCreatesNoJob(t *testing.T) {
+	m, store := startManager(t, &fakeDriver{session: &fakeSession{}})
+	if _, err := m.StartScan(DefaultSettings); !errors.Is(err, ErrNoPaper) {
+		t.Fatalf("got %v, want ErrNoPaper", err)
+	}
+	if jobs, _ := store.ListJobs(); len(jobs) != 0 {
+		t.Errorf("an empty feeder must not leave an empty job behind, got %d", len(jobs))
+	}
+}
+
+func TestScan_SingleSidedStoresOriginalJPEGsAndThumbnails(t *testing.T) {
+	first, second := side(t, textPage()), side(t, textPage())
+	sess, meta, store := scan(t, storage.ScanSettings{Sides: SidesSingle}, sheet(first, nil), sheet(second, nil))
+
+	if len(meta.Pages) != 2 || meta.Pages[0].ID != "001f" || meta.Pages[1].ID != "002f" {
+		t.Fatalf("pages: %+v", meta.Pages)
+	}
+	stored, err := store.LoadPageFile(meta.ID, meta.Pages[0].File)
+	if err != nil || !bytes.Equal(stored, first.JPEG) {
+		t.Error("the scanner's JPEG must be stored byte for byte")
+	}
+	p := meta.Pages[0]
+	if p.WidthPx != 300 || p.HeightPx != 400 || p.Side != "front" || p.Sheet != 1 {
+		t.Errorf("page meta: %+v", p)
+	}
+	if _, ok := store.LoadRender(meta.ID, p.ID, pageimage.CacheKey(p.Edits, "thumb")); !ok {
+		t.Error("a thumbnail should be pre-rendered at scan time")
+	}
+	if sess.opts[0].Duplex || sess.opts[0].Resolution != 300 {
+		t.Errorf("single-sided default scan sent %+v", sess.opts[0])
+	}
+}
+
+func TestScan_DoubleSidedKeepsBlankBacksVisible(t *testing.T) {
+	blank := side(t, page(color.White, 300, 400))
+	sess, meta, _ := scan(t, storage.ScanSettings{Sides: SidesDouble}, sheet(side(t, textPage()), &blank))
+
+	if !sess.opts[0].Duplex {
+		t.Error("double-sided must scan duplex")
+	}
 	if len(meta.Pages) != 2 {
-		t.Fatalf("expected 2 independent pages from one duplex sheet, got %+v", meta.Pages)
+		t.Fatalf("pages: %+v", meta.Pages)
 	}
-	if meta.Pages[0].Index != 1 || meta.Pages[1].Index != 2 {
-		t.Fatalf("expected sequential indexes 1,2, got %d,%d", meta.Pages[0].Index, meta.Pages[1].Index)
-	}
-	if _, err := store.LoadPageFile(id, meta.Pages[0].File); err != nil {
-		t.Errorf("front file not saved: %v", err)
-	}
-	if _, err := store.LoadPageFile(id, meta.Pages[1].File); err != nil {
-		t.Errorf("back file not saved: %v", err)
+	back := meta.Pages[1]
+	if back.ID != "001b" || !back.Blank || back.Hidden {
+		t.Errorf("a blank back is flagged but never hidden in double-sided mode: %+v", back)
 	}
 }
 
-func TestManager_StartScan_DuplexBlankBackDropped(t *testing.T) {
-	page := driver.Page{
-		Front:     testImage(4, 4, color.NRGBA{R: 255, A: 255}),
-		Back:      nil,
-		BackBlank: true,
-	}
-	drv := &fakeDriver{session: &fakeSession{pages: []driver.Page{page}}}
-	m, store := newTestManager(t, drv)
+func TestScan_AutoSidesHidesBlankBacksButKeepsThem(t *testing.T) {
+	blank := side(t, page(color.White, 300, 400))
+	inked := side(t, textPage())
+	_, meta, store := scan(t, storage.ScanSettings{Sides: SidesAuto},
+		sheet(side(t, textPage()), &blank),
+		sheet(side(t, textPage()), &inked))
 
-	id, err := m.StartScan(true)
-	if err != nil {
-		t.Fatalf("StartScan: %v", err)
+	if len(meta.Pages) != 4 {
+		t.Fatalf("every side must be stored, got %d pages", len(meta.Pages))
 	}
-	waitForJobDone(t, m)
-
-	meta, err := store.LoadMeta(id)
-	if err != nil {
-		t.Fatal(err)
+	if !meta.Pages[1].Hidden || meta.Pages[3].Hidden {
+		t.Errorf("only the blank back should be hidden: %+v", meta.Pages)
 	}
-	if len(meta.Pages) != 1 {
-		t.Fatalf("expected only the front page (blank back dropped), got %+v", meta.Pages)
+	if _, err := store.LoadPageFile(meta.ID, meta.Pages[1].File); err != nil {
+		t.Error("a hidden page's original must still be on disk so it can be restored")
+	}
+	if len(meta.VisiblePages()) != 3 {
+		t.Errorf("visible pages: %d", len(meta.VisiblePages()))
 	}
 }
 
-// TestManager_StartScan_MixedDuplexAndSimplexNumbering matches the exact
-// scenario a user described: one duplex sheet followed by one simplex
-// sheet should number 1, 2 (the duplex sheet's front/back), then 3 (the
-// simplex sheet) — page numbers track saved images, not physical sheets.
-func TestManager_StartScan_MixedDuplexAndSimplexNumbering(t *testing.T) {
-	duplexSheet := driver.Page{
-		Front: testImage(4, 4, color.NRGBA{R: 255, A: 255}),
-		Back:  testImage(4, 4, color.NRGBA{G: 255, A: 255}),
-	}
-	simplexSheet := driver.Page{Front: testImage(4, 4, color.NRGBA{B: 255, A: 255})}
-	drv := &fakeDriver{session: &fakeSession{pages: []driver.Page{duplexSheet, simplexSheet}}}
-	m, store := newTestManager(t, drv)
+func TestScan_ColorModes(t *testing.T) {
+	red := page(color.White, 300, 400)
+	draw.Draw(red, image.Rect(50, 50, 250, 250), &image.Uniform{color.RGBA{220, 20, 20, 255}}, image.Point{}, draw.Src)
 
-	id, err := m.StartScan(true)
-	if err != nil {
-		t.Fatalf("StartScan: %v", err)
+	_, meta, _ := scan(t, storage.ScanSettings{Sides: SidesSingle, Color: ColorAuto},
+		sheet(side(t, red), nil), sheet(side(t, textPage()), nil))
+	if meta.Pages[0].Edits.Color != pageimage.ColorColor || meta.Pages[1].Edits.Color != pageimage.ColorBW {
+		t.Errorf("auto color: got %q and %q", meta.Pages[0].Edits.Color, meta.Pages[1].Edits.Color)
 	}
-	waitForJobDone(t, m)
 
-	meta, err := store.LoadMeta(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(meta.Pages) != 3 {
-		t.Fatalf("expected 3 pages total, got %+v", meta.Pages)
-	}
-	var got []int
-	for _, p := range meta.Pages {
-		got = append(got, p.Index)
-	}
-	want := []int{1, 2, 3}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("page indexes = %v, want %v", got, want)
-		}
+	_, meta, _ = scan(t, storage.ScanSettings{Sides: SidesSingle, Color: "gray"}, sheet(side(t, red), nil))
+	if meta.Pages[0].Edits.Color != pageimage.ColorGray {
+		t.Errorf("a fixed color setting applies to every page, got %q", meta.Pages[0].Edits.Color)
 	}
 }
 
-func TestManager_StartScan_AlreadyRunning(t *testing.T) {
-	// A session with a page that never completes HasNextPage quickly is
-	// hard to hold "running" deterministically without a hook, so
-	// instead we mark m.running manually to simulate a scan already in
-	// progress, avoiding any timing dependency.
-	m, _ := newTestManager(t, &fakeDriver{session: &fakeSession{}})
+func TestScan_NonSquare200dpiIsSquaredUp(t *testing.T) {
+	s := side(t, textPage())
+	s.XDPI, s.YDPI = 300, 200
+	sess, meta, _ := scan(t, storage.ScanSettings{Resolution: 200, Sides: SidesSingle}, sheet(s, nil))
+
+	if sess.opts[0].Resolution != 200 {
+		t.Errorf("resolution not forwarded: %+v", sess.opts[0])
+	}
+	if p := meta.Pages[0]; p.WidthPx != 200 || p.XDPI != 300 || p.YDPI != 200 {
+		t.Errorf("page: %+v", p)
+	}
+}
+
+func TestStartScan_AlreadyRunning(t *testing.T) {
+	m, _ := startManager(t, &fakeDriver{session: &fakeSession{}})
+	m.mu.Lock()
 	m.running = &JobState{ID: "existing-job", Status: storage.StatusRunning}
-
-	if _, err := m.StartScan(false); err != ErrAlreadyRunning {
+	m.mu.Unlock()
+	if !m.Scanning() || !m.Device().Scanning {
+		t.Error("Scanning should report the running job")
+	}
+	if _, err := m.StartScan(DefaultSettings); err != ErrAlreadyRunning {
 		t.Fatalf("got %v, want ErrAlreadyRunning", err)
 	}
 }
 
-func TestManager_StartScan_OpenError(t *testing.T) {
-	drv := &fakeDriver{openErr: errTest("no device")}
-	m, store := newTestManager(t, drv)
+func TestStartScan_TimesOutWithoutRun(t *testing.T) {
+	m := NewManager(&fakeDriver{session: &fakeSession{}}, storage.New(t.TempDir()))
+	m.Timings.Reply = 10 * time.Millisecond
+	if _, err := m.StartScan(DefaultSettings); !errors.Is(err, ErrScannerUnavailable) {
+		t.Errorf("nobody owns the scanner: got %v", err)
+	}
+}
 
-	id, err := m.StartScan(false)
+func TestCurrentJob_NilBeforeAnyScan(t *testing.T) {
+	m, _ := startManager(t, &fakeDriver{session: &fakeSession{}})
+	if m.CurrentJob() != nil || m.Scanning() {
+		t.Error("expected no job before any scan has started")
+	}
+}
+
+func TestRun_SleepingScannerIsReportedAndRecovered(t *testing.T) {
+	drv := &fakeDriver{session: &fakeSession{}, offline: errTest("no USB device")}
+	m, _ := startManager(t, drv)
+
+	waitFor(t, "an offline status", func() bool { return m.Device().Err == errTest("no USB device") })
+	if m.Device().Connected {
+		t.Error("a sleeping scanner is not connected")
+	}
+	if _, err := m.StartScan(DefaultSettings); !errors.Is(err, ErrScannerUnavailable) {
+		t.Errorf("scanning while asleep: got %v", err)
+	}
+
+	before := drv.openCount()
+	waitFor(t, "a retry", func() bool { return drv.openCount() > before })
+	drv.setOffline(nil)
+	waitFor(t, "the scanner to reconnect", func() bool { return m.Device().Connected })
+}
+
+func TestRun_TracksPaper(t *testing.T) {
+	sess := &fakeSession{}
+	m, _ := startManager(t, &fakeDriver{session: sess})
+	waitFor(t, "the scanner to connect", func() bool { return m.Device().Connected })
+	sess.setPages(sheet(side(t, textPage()), nil))
+	waitFor(t, "paper to be noticed", func() bool { return m.Device().Paper })
+}
+
+func TestRun_ButtonScansWithSavedSettings(t *testing.T) {
+	sess := &fakeSession{pages: []driver.Page{sheet(side(t, textPage()), nil)}, pressDuringScan: true}
+	m, store := startManager(t, &fakeDriver{session: sess})
+	if err := store.SaveSettings(storage.AppSettings{ButtonScan: storage.ScanSettings{Resolution: 600, Sides: SidesSingle}}); err != nil {
+		t.Fatal(err)
+	}
+
+	sess.press()
+	state := finished(t, m)
+	meta, err := store.LoadMeta(state.ID)
+	if err != nil || len(meta.Pages) != 1 {
+		t.Fatalf("button scan: %+v %v", meta, err)
+	}
+	if meta.Settings != (storage.ScanSettings{Resolution: 600, Sides: SidesSingle, Color: ColorAuto}) {
+		t.Errorf("button scans use the saved settings, got %+v", meta.Settings)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if jobs, _ := store.ListJobs(); len(jobs) != 1 {
+		t.Errorf("a press made during the scan must not start another one, got %d jobs", len(jobs))
+	}
+}
+
+func TestRun_ButtonWithoutPaperDoesNothing(t *testing.T) {
+	sess := &fakeSession{}
+	m, store := startManager(t, &fakeDriver{session: sess})
+	waitFor(t, "the scanner to connect", func() bool { return m.Device().Connected })
+	sess.press()
+	time.Sleep(50 * time.Millisecond)
+	if jobs, _ := store.ListJobs(); len(jobs) != 0 || m.CurrentJob() != nil {
+		t.Errorf("a press with an empty feeder must not create a job, got %d", len(jobs))
+	}
+}
+
+func TestButtonSettings_FallBackToDefaults(t *testing.T) {
+	store := storage.New(t.TempDir())
+	m := NewManager(&fakeDriver{}, store)
+	if m.ButtonSettings() != DefaultSettings {
+		t.Error("no saved settings means the defaults")
+	}
+	if err := store.SaveSettings(storage.AppSettings{ButtonScan: storage.ScanSettings{Resolution: 150}}); err != nil {
+		t.Fatal(err)
+	}
+	if m.ButtonSettings() != DefaultSettings {
+		t.Error("invalid saved settings fall back to the defaults")
+	}
+	if err := os.WriteFile(store.Root()+"/settings.json", []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if m.ButtonSettings() != DefaultSettings {
+		t.Error("unreadable settings fall back to the defaults")
+	}
+}
+
+func TestRun_SessionErrorsReconnect(t *testing.T) {
+	for name, sess := range map[string]*fakeSession{
+		"button": {buttonErr: errTest("pipe stalled")},
+		"sensor": {hasNextErr: errTest("sensor failed")},
+	} {
+		drv := &fakeDriver{session: sess}
+		m, _ := startManager(t, drv)
+		waitFor(t, name+" reconnects", func() bool { return drv.openCount() >= 3 })
+		if _, err := m.StartScan(DefaultSettings); err == nil {
+			t.Errorf("%s: a scan on a failing session should not succeed", name)
+		}
+	}
+}
+
+func failedScan(t *testing.T, sess *fakeSession) (*JobState, storage.JobMeta) {
+	t.Helper()
+	drv := &fakeDriver{session: sess}
+	m, store := startManager(t, drv)
+	id, err := m.StartScan(DefaultSettings)
 	if err != nil {
-		t.Fatalf("StartScan should succeed synchronously even though the background run fails: %v", err)
+		t.Fatalf("StartScan: %v", err)
 	}
-	state := waitForJobDone(t, m)
-	if state.Status != storage.StatusFailed {
-		t.Errorf("status: got %v", state.Status)
+	state := finished(t, m)
+	if state.Status != storage.StatusFailed || state.Err == nil {
+		t.Fatalf("expected a failed job, got %v (%v)", state.Status, state.Err)
 	}
-	if state.Err == nil {
-		t.Error("expected a recorded error")
-	}
-
 	meta, err := store.LoadMeta(id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if meta.Status != storage.StatusFailed || meta.Error == "" {
-		t.Errorf("meta: got %+v", meta)
+		t.Errorf("meta: %+v", meta)
 	}
+	waitFor(t, "a fresh session after the failure", func() bool { return drv.openCount() >= 2 })
+	return state, meta
 }
 
-func TestManager_StartScan_HasNextPageError(t *testing.T) {
-	drv := &fakeDriver{session: &fakeSession{hasNextErr: errTest("media check failed")}}
-	m, _ := newTestManager(t, drv)
-
-	if _, err := m.StartScan(false); err != nil {
-		t.Fatalf("StartScan: %v", err)
-	}
-	state := waitForJobDone(t, m)
-	if state.Status != storage.StatusFailed {
-		t.Errorf("status: got %v", state.Status)
-	}
+func TestScan_Failures(t *testing.T) {
+	undecodable := driver.Side{JPEG: []byte("not a jpeg"), XDPI: 300, YDPI: 300}
+	good := side(t, textPage())
+	failedScan(t, &fakeSession{pages: []driver.Page{sheet(undecodable, nil)}})
+	failedScan(t, &fakeSession{pages: []driver.Page{sheet(good, &undecodable)}})
 }
 
-func TestManager_StartScan_ScanPageErrorMidLoop(t *testing.T) {
-	page1 := driver.Page{Front: testImage(4, 4, color.NRGBA{R: 255, A: 255})}
-	page2 := driver.Page{Front: testImage(4, 4, color.NRGBA{G: 255, A: 255})}
-	drv := &fakeDriver{session: &fakeSession{
-		pages:     []driver.Page{page1, page2},
-		scanErr:   errTest("scsi error"),
+func TestScan_FailureMidLoopKeepsEarlierPages(t *testing.T) {
+	good := side(t, textPage())
+	state, meta := failedScan(t, &fakeSession{
+		pages:     []driver.Page{sheet(good, nil), sheet(good, nil)},
+		scanErr:   errTest("paper jam"),
 		scanErrAt: 2,
-	}}
-	m, store := newTestManager(t, drv)
-
-	id, err := m.StartScan(false)
-	if err != nil {
-		t.Fatalf("StartScan: %v", err)
-	}
-	state := waitForJobDone(t, m)
-	if state.Status != storage.StatusFailed {
-		t.Fatalf("status: got %v", state.Status)
-	}
-	if state.PagesScanned != 1 {
-		t.Errorf("expected page 1 to have been saved before the failure, got pagesScanned=%d", state.PagesScanned)
-	}
-
-	meta, err := store.LoadMeta(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(meta.Pages) != 1 {
-		t.Errorf("expected page 1's metadata to be persisted despite the later failure, got %d pages", len(meta.Pages))
+	})
+	if state.PagesScanned != 1 || len(meta.Pages) != 1 {
+		t.Errorf("sheet 1 should be kept: scanned=%d pages=%d", state.PagesScanned, len(meta.Pages))
 	}
 }
 
-func TestManager_StartScan_CreateJobError(t *testing.T) {
-	drv := &fakeDriver{session: &fakeSession{}}
-	// Use a store whose root can never be created (a file in the way).
+func TestStartScan_CreateJobError(t *testing.T) {
 	badRoot := t.TempDir() + "/blocker"
-	if err := writeFile(badRoot, "x"); err != nil {
+	if err := os.WriteFile(badRoot, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	store := storage.New(badRoot + "/data")
-	m := NewManager(drv, store)
-
-	if _, err := m.StartScan(false); err == nil {
+	drv := &fakeDriver{session: &fakeSession{pages: []driver.Page{sheet(side(t, textPage()), nil)}}}
+	m := NewManager(drv, storage.New(badRoot+"/data"))
+	m.Timings = Timings{Reconnect: 20 * time.Millisecond, ButtonPoll: 5 * time.Millisecond, Reply: 2 * time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+	if _, err := m.StartScan(DefaultSettings); err == nil {
 		t.Fatal("expected an error")
 	}
 }
 
-func TestManager_StartScan_SavePageError(t *testing.T) {
+func TestScan_SavePageError(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permission-based test is unreliable")
 	}
-	page := driver.Page{Front: testImage(4, 4, color.NRGBA{R: 255, A: 255})}
-	drv := &fakeDriver{session: &fakeSession{pages: []driver.Page{page}}}
-	m, store := newTestManager(t, drv)
+	sess := &fakeSession{pages: []driver.Page{sheet(side(t, textPage()), nil)}}
+	store := storage.New(t.TempDir())
+	m := NewManager(&fakeDriver{session: sess}, store)
 
-	// Drive run() directly (synchronously) instead of via StartScan's
-	// background goroutine, so the pages directory can be made
-	// unwritable deterministically before the scan ever touches it —
-	// no timing race against a concurrent goroutine.
-	now := time.Now()
-	id := storage.NewJobID(now)
-	meta := storage.JobMeta{
-		ID: id, Name: storage.NewJobName(now), Driver: drv.Info().Name,
-		CreatedAt: now, Status: storage.StatusRunning,
-	}
-	if err := store.CreateJob(meta); err != nil {
+	meta, err := m.createJob(DefaultSettings)
+	if err != nil {
 		t.Fatal(err)
 	}
-	m.running = &JobState{ID: id, Status: storage.StatusRunning}
-
-	pagesDir := store.Root() + "/jobs/" + id + "/pages"
+	pagesDir := store.Root() + "/jobs/" + meta.ID + "/pages"
 	if err := os.Chmod(pagesDir, 0o555); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Chmod(pagesDir, 0o755)
 
-	m.run(context.Background(), id, false, meta)
-
-	state := m.CurrentJob()
-	if state.Status != storage.StatusFailed {
+	if err := m.run(context.Background(), sess, meta); err == nil {
+		t.Fatal("expected the save failure to surface")
+	}
+	if state := m.CurrentJob(); state.Status != storage.StatusFailed {
 		t.Fatalf("status: got %v (err=%v)", state.Status, state.Err)
-	}
-}
-
-func TestManager_StartScan_BackSaveErrorMidLoop(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: permission-based test is unreliable")
-	}
-	page := driver.Page{
-		Front: testImage(4, 4, color.NRGBA{R: 255, A: 255}),
-		Back:  testImage(4, 4, color.NRGBA{B: 255, A: 255}),
-	}
-	drv := &fakeDriver{session: &fakeSession{pages: []driver.Page{page}}}
-	m, store := newTestManager(t, drv)
-
-	now := time.Now()
-	id := storage.NewJobID(now)
-	meta := storage.JobMeta{
-		ID: id, Name: storage.NewJobName(now), Driver: drv.Info().Name,
-		CreatedAt: now, Status: storage.StatusRunning,
-	}
-	if err := store.CreateJob(meta); err != nil {
-		t.Fatal(err)
-	}
-	m.running = &JobState{ID: id, Status: storage.StatusRunning}
-
-	// The front page (index 1) will be a fresh file the pages/ directory
-	// happily creates; pre-creating the back page's (index 2) target
-	// file read-only makes only its save fail, after the front already
-	// succeeded — exercising the mid-sheet failure path specifically.
-	backPath := store.Root() + "/jobs/" + id + "/pages/" + storage.PageFilename(2)
-	if err := os.WriteFile(backPath, []byte("placeholder"), 0o444); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(backPath, 0o644)
-
-	m.run(context.Background(), id, true, meta)
-
-	state := m.CurrentJob()
-	if state.Status != storage.StatusFailed {
-		t.Fatalf("status: got %v (err=%v)", state.Status, state.Err)
-	}
-
-	persisted, err := store.LoadMeta(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(persisted.Pages) != 1 || persisted.Pages[0].Index != 1 {
-		t.Errorf("expected only the front page to have been persisted, got %+v", persisted.Pages)
-	}
-}
-
-func TestManager_SaveImage_EncodeError(t *testing.T) {
-	original := pngEncode
-	pngEncode = func(w io.Writer, img image.Image) error { return errTest("simulated encode failure") }
-	defer func() { pngEncode = original }()
-
-	store := storage.New(t.TempDir())
-	m := NewManager(&fakeDriver{}, store)
-	if err := store.CreateJob(storage.JobMeta{ID: "job1"}); err != nil {
-		t.Fatal(err)
-	}
-
-	img := testImage(2, 2, color.NRGBA{R: 255, A: 255})
-	if _, err := m.saveImage("job1", 1, img); err == nil {
-		t.Fatal("expected an error")
-	}
-}
-
-func TestManager_SaveImage_SaveFileError(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: permission-based test is unreliable")
-	}
-	store := storage.New(t.TempDir())
-	m := NewManager(&fakeDriver{}, store)
-	if err := store.CreateJob(storage.JobMeta{ID: "job1"}); err != nil {
-		t.Fatal(err)
-	}
-	// Pre-create the target file read-only so writing it fails.
-	path := store.Root() + "/jobs/job1/pages/" + storage.PageFilename(1)
-	if err := os.WriteFile(path, []byte("placeholder"), 0o444); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(path, 0o644)
-
-	img := testImage(2, 2, color.NRGBA{R: 255, A: 255})
-	if _, err := m.saveImage("job1", 1, img); err == nil {
-		t.Fatal("expected an error")
 	}
 }
 
 type errTest string
 
 func (e errTest) Error() string { return string(e) }
-
-func writeFile(path, contents string) error {
-	return os.WriteFile(path, []byte(contents), 0o644)
-}

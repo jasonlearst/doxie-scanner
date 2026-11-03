@@ -10,6 +10,8 @@
 // condition's sense data for the caller to interpret.
 package scsiusb
 
+import "context"
+
 // BulkDevice is the minimal seam between this package's protocol-level
 // logic and a real USB device. The only implementation that talks to real
 // hardware is the gousb-backed one in usbdevice.go; everywhere else in
@@ -27,6 +29,12 @@ type BulkDevice interface {
 	Read(p []byte) (int, error)
 	// Close releases the underlying device/interface/context.
 	Close() error
+}
+
+// InterruptReader is implemented by devices with an interrupt IN pipe,
+// which Avision scanners use to report button presses.
+type InterruptReader interface {
+	ReadInterrupt(ctx context.Context, p []byte) (int, error)
 }
 
 // CommandSender is implemented by devices that can deliver a CDB as a

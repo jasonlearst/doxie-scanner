@@ -15,18 +15,16 @@ type Config struct {
 	// DriverName selects which registered driver.Driver to use (see
 	// internal/driver.Get).
 	DriverName string
-	// OCRLang is the tesseract language code used for "Extract Text".
-	// Anything other than the default "eng" requires the matching
-	// tesseract-ocr-data-<lang> (Alpine) / tesseract-ocr-<lang> (Debian)
-	// package to also be installed in the image.
-	OCRLang string
+	// PaperlessURL and PaperlessToken enable "Send to Paperless"; both
+	// must be set.
+	PaperlessURL   string
+	PaperlessToken string
 }
 
 const (
 	defaultDataDir    = "/data"
 	defaultListenAddr = ":8080"
 	defaultDriverName = "doxie-dx400"
-	defaultOCRLang    = "eng"
 )
 
 // loadConfig reads configuration from environment variables via getenv
@@ -36,7 +34,6 @@ func loadConfig(getenv func(string) string) Config {
 		DataDir:    defaultDataDir,
 		ListenAddr: defaultListenAddr,
 		DriverName: defaultDriverName,
-		OCRLang:    defaultOCRLang,
 	}
 	if v := getenv("DOXIE_DATA_DIR"); v != "" {
 		cfg.DataDir = v
@@ -47,8 +44,7 @@ func loadConfig(getenv func(string) string) Config {
 	if v := getenv("DOXIE_DRIVER"); v != "" {
 		cfg.DriverName = v
 	}
-	if v := getenv("DOXIE_OCR_LANG"); v != "" {
-		cfg.OCRLang = v
-	}
+	cfg.PaperlessURL = getenv("DOXIE_PAPERLESS_URL")
+	cfg.PaperlessToken = getenv("DOXIE_PAPERLESS_TOKEN")
 	return cfg
 }

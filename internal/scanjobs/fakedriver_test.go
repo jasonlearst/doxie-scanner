@@ -3,25 +3,36 @@ package scanjobs
 import (
 	"context"
 	"errors"
+	"sync"
+	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
 )
 
-// fakeSession is an in-memory driver.Session used to drive Manager's
-// orchestration logic without a real scanner.
+// fakeSession is an in-memory driver.Session. Paper is present while
+// scripted sheets remain.
 type fakeSession struct {
+	mu sync.Mutex
+
 	pages []driver.Page
 	idx   int
 
 	hasNextErr error
 	scanErr    error
-	scanErrAt  int // 1-based page index at which ScanPage returns scanErr; 0 = never
+	scanErrAt  int // 1-based sheet at which ScanPage returns scanErr; 0 = never
+	buttonErr  error
+	presses    int // pending presses of the scanner's button
 
-	closeErr error
-	closed   bool
+	// pressDuringScan queues a press while a sheet is being scanned.
+	pressDuringScan bool
+
+	closed int
+	opts   []driver.ScanOptions
 }
 
 func (s *fakeSession) HasNextPage(ctx context.Context) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.hasNextErr != nil {
 		return false, s.hasNextErr
 	}
@@ -29,7 +40,13 @@ func (s *fakeSession) HasNextPage(ctx context.Context) (bool, error) {
 }
 
 func (s *fakeSession) ScanPage(ctx context.Context, opts driver.ScanOptions) (driver.Page, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.idx++
+	s.opts = append(s.opts, opts)
+	if s.pressDuringScan {
+		s.presses++
+	}
 	if s.scanErr != nil && s.idx == s.scanErrAt {
 		return driver.Page{}, s.scanErr
 	}
@@ -39,26 +56,76 @@ func (s *fakeSession) ScanPage(ctx context.Context, opts driver.ScanOptions) (dr
 	return s.pages[s.idx-1], nil
 }
 
-func (s *fakeSession) Close() error {
-	s.closed = true
-	return s.closeErr
+func (s *fakeSession) WaitForButton(ctx context.Context, timeout time.Duration) (bool, error) {
+	s.mu.Lock()
+	if s.buttonErr != nil {
+		err := s.buttonErr
+		s.mu.Unlock()
+		return false, err
+	}
+	if s.presses > 0 {
+		s.presses--
+		s.mu.Unlock()
+		return true, nil
+	}
+	s.mu.Unlock()
+	select {
+	case <-time.After(timeout):
+	case <-ctx.Done():
+	}
+	return false, nil
 }
 
-// fakeDriver is an in-memory driver.Driver used to drive Manager's
-// orchestration logic without a real scanner.
+func (s *fakeSession) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed++
+	return nil
+}
+
+func (s *fakeSession) press() {
+	s.mu.Lock()
+	s.presses++
+	s.mu.Unlock()
+}
+
+func (s *fakeSession) setPages(pages ...driver.Page) {
+	s.mu.Lock()
+	s.pages, s.idx = pages, 0
+	s.mu.Unlock()
+}
+
+// fakeDriver hands out its one session; while offline is set, Open fails
+// the way a sleeping scanner does.
 type fakeDriver struct {
 	info    driver.Info
 	session *fakeSession
-	openErr error
+
+	mu      sync.Mutex
+	offline error
+	opens   int
 }
 
 func (d *fakeDriver) Info() driver.Info { return d.info }
 
-func (d *fakeDriver) Detect(ctx context.Context) error { return nil }
-
 func (d *fakeDriver) Open(ctx context.Context) (driver.Session, error) {
-	if d.openErr != nil {
-		return nil, d.openErr
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.opens++
+	if d.offline != nil {
+		return nil, d.offline
 	}
 	return d.session, nil
+}
+
+func (d *fakeDriver) setOffline(err error) {
+	d.mu.Lock()
+	d.offline = err
+	d.mu.Unlock()
+}
+
+func (d *fakeDriver) openCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.opens
 }

@@ -8,7 +8,6 @@ import (
 type stubDriver struct{ name string }
 
 func (s *stubDriver) Info() Info                                { return Info{Name: s.name} }
-func (s *stubDriver) Detect(ctx context.Context) error          { return nil }
 func (s *stubDriver) Open(ctx context.Context) (Session, error) { return nil, nil }
 
 func TestRegisterAndGet(t *testing.T) {

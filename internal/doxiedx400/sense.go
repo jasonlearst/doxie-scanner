@@ -8,8 +8,20 @@ import (
 	"github.com/andiapps-dev/doxie-scanner/internal/scsiusb"
 )
 
-// ErrNoPaper means the scanner reported its feeder empty.
-var ErrNoPaper = errors.New("doxiedx400: no paper in the feeder")
+// Conditions the scanner reports, worded for the person at the scanner.
+var (
+	ErrNoPaper   = errors.New("no paper in the feeder")
+	ErrPaperJam  = errors.New("paper jam: open the scanner, remove the sheet, then turn it off and on")
+	ErrCoverOpen = errors.New("the scanner is open: close it and try again")
+	ErrMultiFeed = errors.New("two sheets went through at once: rescan them one at a time")
+)
+
+var senseErrors = map[byte]error{
+	ascqPaperJam:   ErrPaperJam,
+	ascqCoverOpen:  ErrCoverOpen,
+	ascqChuteEmpty: ErrNoPaper,
+	ascqMultiFeed:  ErrMultiFeed,
+}
 
 const (
 	senseMinLen    = 31
@@ -19,8 +31,11 @@ const (
 	offSenseLines  = 25
 	offSideBytes   = 27
 	ascADF         = 0x80
+	ascqPaperJam   = 0x01
+	ascqCoverOpen  = 0x02
 	ascqChuteEmpty = 0x03
 	ascqPaperEnd   = 0x04
+	ascqMultiFeed  = 0x05
 )
 
 // sense is the vendor sense block (opcode 0xE3). At the end of a side it
@@ -51,8 +66,8 @@ func parseSense(b []byte) (sense, error) {
 func (s sense) endOfSide() bool { return s.asc == ascADF && s.ascq == ascqPaperEnd }
 
 func (s sense) err() error {
-	if s.asc == ascADF && s.ascq == ascqChuteEmpty {
-		return ErrNoPaper
+	if known, ok := senseErrors[s.ascq]; ok && s.asc == ascADF {
+		return known
 	}
 	return &scsiusb.ScsiError{Message: fmt.Sprintf("scanner reported asc=%#02x ascq=%#02x (sense % x)", s.asc, s.ascq, s.raw)}
 }

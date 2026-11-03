@@ -1,5 +1,5 @@
-// Package web embeds the frontend (HTML/CSS/JS plus vendored
-// Bootstrap/Bootswatch/Cropper.js) directly into the compiled binary, so
+// Package web embeds the frontend (HTML/CSS/JS plus vendored Cropper.js)
+// directly into the compiled binary, so
 // the application is a single self-contained executable with no separate
 // static-file directory to ship alongside it — consistent with this
 // project's standalone requirement.

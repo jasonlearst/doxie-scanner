@@ -4,8 +4,6 @@ package doxiedx400
 
 import (
 	"context"
-	"image"
-	"image/jpeg"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -55,27 +53,20 @@ func TestHardwareScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	t.Logf("scanned and decoded in %s, back blank: %v", time.Since(start).Round(100*time.Millisecond), page.BackBlank)
+	t.Logf("scanned in %s", time.Since(start).Round(100*time.Millisecond))
 
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, side := range []struct {
-		name string
-		img  image.Image
-	}{{"front", page.Front}, {"back", page.Back}} {
-		if side.img == nil {
+	sides := map[string]*driver.Side{"front": &page.Front, "back": page.Back}
+	for name, side := range sides {
+		if side == nil {
 			continue
 		}
-		path := filepath.Join(out, side.name+".jpg")
-		f, err := os.Create(path)
-		if err != nil {
+		path := filepath.Join(out, name+".jpg")
+		if err := os.WriteFile(path, side.JPEG, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := jpeg.Encode(f, side.img, &jpeg.Options{Quality: 90}); err != nil {
-			t.Fatal(err)
-		}
-		f.Close()
-		t.Logf("%s: %v -> %s", side.name, side.img.Bounds().Size(), path)
+		t.Logf("%s: %d bytes at %dx%d dpi -> %s", name, len(side.JPEG), side.XDPI, side.YDPI, path)
 	}
 }

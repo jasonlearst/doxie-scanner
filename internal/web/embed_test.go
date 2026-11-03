@@ -9,7 +9,7 @@ import "testing"
 // broken embed path.
 func TestFS_ContainsExpectedEntries(t *testing.T) {
 	fsys := FS()
-	for _, name := range []string{"index.html", "app.js", "style.css", "vendor/bootstrap.min.css", "vendor/bootstrap.bundle.min.js", "vendor/cropper.min.css", "vendor/cropper.min.js"} {
+	for _, name := range []string{"index.html", "app.js", "api.js", "style.css", "vendor/cropper.min.css", "vendor/cropper.min.js"} {
 		if _, err := fsys.Open(name); err != nil {
 			t.Errorf("expected embedded file %q, got error: %v", name, err)
 		}

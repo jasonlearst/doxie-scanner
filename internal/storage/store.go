@@ -2,10 +2,13 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 )
 
 // Store persists scan jobs under a single root directory. Every method
@@ -14,7 +17,13 @@ import (
 // rather than fast at a scale this tool will never see.
 type Store struct {
 	root string
+	// mu serializes UpdateMeta's read-modify-write across the web app and
+	// background housekeeping.
+	mu sync.Mutex
 }
+
+// ErrJobNotFound means a job's metadata is missing or unreadable.
+var ErrJobNotFound = errors.New("storage: job not found")
 
 // New returns a Store rooted at root. It does not create or validate the
 // directory — call CheckWritable for that (main.go does this once at
@@ -71,6 +80,25 @@ func (s *Store) SaveMeta(meta JobMeta) error {
 		return fmt.Errorf("storage: write metadata for job %q: %w", meta.ID, err)
 	}
 	return nil
+}
+
+// UpdateMeta loads a job's metadata, lets change edit it, and saves the
+// result, all under one lock. A non-nil error from change aborts the
+// update and is returned as is.
+func (s *Store) UpdateMeta(id string, change func(*JobMeta) error) (JobMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	meta, err := s.LoadMeta(id)
+	if err != nil {
+		return JobMeta{}, fmt.Errorf("%w: %v", ErrJobNotFound, err)
+	}
+	if err := change(&meta); err != nil {
+		return JobMeta{}, err
+	}
+	if err := s.SaveMeta(meta); err != nil {
+		return JobMeta{}, err
+	}
+	return meta, nil
 }
 
 // LoadMeta reads a job's meta.json.
@@ -133,31 +161,50 @@ func (s *Store) LoadPageFile(jobID, filename string) ([]byte, error) {
 	return data, nil
 }
 
-// PageFilePath returns the absolute on-disk path of one page image file
-// for a job, for callers that need to hand a real path to an external
-// tool (e.g. internal/ocr, which shells out to unpaper/tesseract)
-// instead of reading the file's bytes into memory themselves.
-func (s *Store) PageFilePath(jobID, filename string) string {
-	return filepath.Join(s.pagesDir(jobID), filename)
-}
-
-// RenamePageFile renames a page image file within a job (e.g. when pages
-// are renumbered after a deletion). A cheap metadata-only operation
-// since it never touches the file's contents.
-func (s *Store) RenamePageFile(jobID, oldFilename, newFilename string) error {
-	oldPath := filepath.Join(s.pagesDir(jobID), oldFilename)
-	newPath := filepath.Join(s.pagesDir(jobID), newFilename)
-	if err := os.Rename(oldPath, newPath); err != nil {
-		return fmt.Errorf("storage: rename page file %q to %q for job %q: %w", oldFilename, newFilename, jobID, err)
-	}
-	return nil
-}
-
-// DeletePageFile removes one page image file for a job.
+// DeletePageFile removes one page's original and every cached rendering
+// of it.
 func (s *Store) DeletePageFile(jobID, filename string) error {
 	path := filepath.Join(s.pagesDir(jobID), filename)
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("storage: delete page file %q for job %q: %w", filename, jobID, err)
+	}
+	return s.DeleteRenders(jobID, strings.TrimSuffix(filename, filepath.Ext(filename)))
+}
+
+func (s *Store) rendersDir(jobID string) string {
+	return filepath.Join(s.pagesDir(jobID), ".render")
+}
+
+func (s *Store) renderPath(jobID, pageID, key string) string {
+	return filepath.Join(s.rendersDir(jobID), pageID+"-"+key+".jpg")
+}
+
+// LoadRender returns a cached rendering of a page; key identifies the
+// edits and size it was made with.
+func (s *Store) LoadRender(jobID, pageID, key string) ([]byte, bool) {
+	data, err := os.ReadFile(s.renderPath(jobID, pageID, key))
+	return data, err == nil
+}
+
+// SaveRender caches a rendering of a page.
+func (s *Store) SaveRender(jobID, pageID, key string, data []byte) error {
+	if err := os.MkdirAll(s.rendersDir(jobID), 0o755); err != nil {
+		return fmt.Errorf("storage: create render cache for job %q: %w", jobID, err)
+	}
+	if err := os.WriteFile(s.renderPath(jobID, pageID, key), data, 0o644); err != nil {
+		return fmt.Errorf("storage: cache rendering of page %q in job %q: %w", pageID, jobID, err)
+	}
+	return nil
+}
+
+// DeleteRenders drops every cached rendering of a page, e.g. after its
+// edits change.
+func (s *Store) DeleteRenders(jobID, pageID string) error {
+	matches, _ := filepath.Glob(filepath.Join(s.rendersDir(jobID), pageID+"-*.jpg"))
+	for _, m := range matches {
+		if err := os.Remove(m); err != nil {
+			return fmt.Errorf("storage: drop cached rendering %q: %w", filepath.Base(m), err)
+		}
 	}
 	return nil
 }
@@ -166,6 +213,46 @@ func (s *Store) DeletePageFile(jobID, filename string) error {
 func (s *Store) DeleteJob(id string) error {
 	if err := os.RemoveAll(s.jobDir(id)); err != nil {
 		return fmt.Errorf("storage: delete job %q: %w", id, err)
+	}
+	return nil
+}
+
+// AppSettings are the user's saved preferences.
+type AppSettings struct {
+	// ButtonScan is what the scanner's own scan button does.
+	ButtonScan ScanSettings `json:"buttonScan"`
+	// RetentionDays is how long a scan stays after Paperless has filed
+	// every page of it; 0 keeps scans forever, nil means the default.
+	RetentionDays *int `json:"retentionDays,omitempty"`
+}
+
+func (s *Store) settingsPath() string { return filepath.Join(s.root, "settings.json") }
+
+// LoadSettings returns the saved settings, or the zero value if none have
+// been saved yet.
+func (s *Store) LoadSettings() (AppSettings, error) {
+	var settings AppSettings
+	data, err := os.ReadFile(s.settingsPath())
+	if os.IsNotExist(err) {
+		return settings, nil
+	}
+	if err != nil {
+		return settings, fmt.Errorf("storage: read settings: %w", err)
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return settings, fmt.Errorf("storage: parse settings: %w", err)
+	}
+	return settings, nil
+}
+
+// SaveSettings writes the settings.
+func (s *Store) SaveSettings(settings AppSettings) error {
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("storage: marshal settings: %w", err)
+	}
+	if err := os.WriteFile(s.settingsPath(), data, 0o644); err != nil {
+		return fmt.Errorf("storage: write settings: %w", err)
 	}
 	return nil
 }

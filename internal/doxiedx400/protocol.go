@@ -11,8 +11,12 @@ const (
 	VID uint16 = 0x2740
 	PID uint16 = 0x000c
 
-	epBulkIn  = 0x81
-	epBulkOut = 0x02
+	epBulkIn    = 0x81
+	epBulkOut   = 0x02
+	epInterrupt = 0x83
+
+	buttonPacketLen      = 8
+	buttonPressed   byte = 0x80
 
 	usbInterfaceNum = 0
 )
