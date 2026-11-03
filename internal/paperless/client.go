@@ -15,14 +15,22 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// apiVersion is the newest Paperless REST API version this client reads.
+const apiVersion = 10
 
 // Client talks to one Paperless-ngx instance with an API token.
 type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+
+	mu      sync.Mutex
+	agreed  bool
+	version int
 }
 
 // New returns a client for the instance at baseURL (e.g.
@@ -81,7 +89,44 @@ type Task struct {
 // ErrUnauthorized means the token was rejected.
 var ErrUnauthorized = errors.New("paperless rejected the API token")
 
+var errNotAcceptable = errors.New("paperless no longer serves the API version this app asked for")
+
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	version, err := c.agreeVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.send(ctx, method, path, body, contentType, version)
+	if errors.Is(err, errNotAcceptable) {
+		c.mu.Lock()
+		c.agreed = false
+		c.mu.Unlock()
+	}
+	return resp, err
+}
+
+// agreeVersion follows the Paperless docs: read X-Api-Version from one
+// authenticated response, then pin the newest version both sides know
+// in every request's Accept header. A server too old to send the header
+// gets no version at all.
+func (c *Client) agreeVersion(ctx context.Context) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.agreed {
+		return c.version, nil
+	}
+	resp, err := c.send(ctx, http.MethodGet, "/api/tags/?page_size=1", nil, "", 0)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	server, _ := strconv.Atoi(resp.Header.Get("X-Api-Version"))
+	c.version = min(server, apiVersion)
+	c.agreed = true
+	return c.version, nil
+}
+
+func (c *Client) send(ctx context.Context, method, path string, body io.Reader, contentType string, version int) (*http.Response, error) {
 	target := path
 	if !strings.HasPrefix(path, "http") {
 		target = c.baseURL + path
@@ -91,7 +136,11 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, co
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Token "+c.token)
-	req.Header.Set("Accept", "application/json")
+	accept := "application/json"
+	if version > 0 {
+		accept += "; version=" + strconv.Itoa(version)
+	}
+	req.Header.Set("Accept", accept)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -106,6 +155,9 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, co
 	if resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusNotAcceptable {
+			return nil, fmt.Errorf("%w (version %d): %s", errNotAcceptable, version, strings.TrimSpace(string(msg)))
+		}
 		return nil, fmt.Errorf("paperless: %s %s: %s %s", method, path, resp.Status, strings.TrimSpace(string(msg)))
 	}
 	return resp, nil
