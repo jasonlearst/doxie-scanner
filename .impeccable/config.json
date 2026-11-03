@@ -1,0 +1,88 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "cream-palette",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-zoo.html"
+        ],
+        "createdAt": "2026-11-03T05:04:03.637Z",
+        "reason": "challenger world rule: aww2-zoo-gardens-guide-map specifies cream #F5F1E4 as its water ground"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/assigned.html",
+          ".impeccable/mocks/decision/challenger-zoo.html",
+          ".impeccable/mocks/decision/model-pick.html"
+        ],
+        "createdAt": "2026-11-03T05:57:56.671Z",
+        "reason": "Agent: rejected direction sketches from the decision round; each is a different visual world on purpose, so DESIGN.md's system doesn't apply"
+      },
+      {
+        "rule": "design-system-font-size",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/assigned.html",
+          ".impeccable/mocks/decision/challenger-zoo.html",
+          ".impeccable/mocks/decision/model-pick.html"
+        ],
+        "createdAt": "2026-11-03T05:57:56.695Z",
+        "reason": "Agent: rejected direction sketches from the decision round; each is a different visual world on purpose, so DESIGN.md's system doesn't apply"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/assigned.html",
+          ".impeccable/mocks/decision/challenger-zoo.html",
+          ".impeccable/mocks/decision/model-pick.html"
+        ],
+        "createdAt": "2026-11-03T05:57:56.718Z",
+        "reason": "Agent: rejected direction sketches from the decision round; each is a different visual world on purpose, so DESIGN.md's system doesn't apply"
+      },
+      {
+        "rule": "design-system-radius",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/assigned.html",
+          ".impeccable/mocks/decision/challenger-zoo.html",
+          ".impeccable/mocks/decision/model-pick.html"
+        ],
+        "createdAt": "2026-11-03T05:57:56.739Z",
+        "reason": "Agent: rejected direction sketches from the decision round; each is a different visual world on purpose, so DESIGN.md's system doesn't apply"
+      },
+      {
+        "rule": "design-system-font-size",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon.html"
+        ],
+        "createdAt": "2026-11-03T05:58:36.588Z",
+        "reason": "Agent: the chosen decision sketch, kept as a record; the build adapted it (deepened tint, final sizes), and DESIGN.md records the shipped values"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon.html"
+        ],
+        "createdAt": "2026-11-03T05:58:36.613Z",
+        "reason": "Agent: the chosen decision sketch, kept as a record; the build adapted it (deepened tint, final sizes), and DESIGN.md records the shipped values"
+      },
+      {
+        "rule": "design-system-radius",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon.html"
+        ],
+        "createdAt": "2026-11-03T05:58:36.636Z",
+        "reason": "Agent: the chosen decision sketch, kept as a record; the build adapted it (deepened tint, final sizes), and DESIGN.md records the shipped values"
+      }
+    ]
+  }
+}

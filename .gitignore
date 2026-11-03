@@ -7,3 +7,10 @@ coverage.html
 # Paperless URL and token
 .env
 .env.local
+
+# Impeccable's local review captures, session state and discarded sketches
+.impeccable/review/
+.impeccable/questions/
+.impeccable/mocks/
+.impeccable/hook.cache.json
+.impeccable/config.local.json
