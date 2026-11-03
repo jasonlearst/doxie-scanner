@@ -8,15 +8,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
-// fakePaperless serves just enough of the Paperless-ngx API.
+// fakePaperless serves just enough of the Paperless-ngx API, answering
+// the client's one-off version check itself.
 func fakePaperless(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Token secret" {
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if isVersionCheck(r) {
+			fmt.Fprint(w, `{"count":0,"next":null,"results":[]}`)
 			return
 		}
 		handler(w, r)
@@ -184,5 +190,76 @@ func TestDocumentURL(t *testing.T) {
 func TestBadBaseURL(t *testing.T) {
 	if err := New("http://bad host", "t").Ping(context.Background()); err == nil {
 		t.Error("an invalid URL should fail")
+	}
+}
+
+func isVersionCheck(r *http.Request) bool {
+	return r.URL.Path == "/api/tags/" && r.URL.Query().Get("page_size") == "1"
+}
+
+func TestAPIVersionIsPinnedFromTheServer(t *testing.T) {
+	for server, want := range map[string]string{
+		"":   "application/json",
+		"9":  "application/json; version=9",
+		"10": "application/json; version=10",
+		"11": "application/json; version=10",
+	} {
+		var mu sync.Mutex
+		checks, accept := 0, ""
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			if server != "" {
+				w.Header().Set("X-Api-Version", server)
+			}
+			if isVersionCheck(r) {
+				checks++
+				fmt.Fprint(w, `{"results":[]}`)
+				return
+			}
+			accept = r.Header.Get("Accept")
+			fmt.Fprint(w, `[]`)
+		}))
+		c := New(srv.URL, "t")
+		for range 2 {
+			if _, err := c.Task(context.Background(), "abc"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if checks != 1 || accept != want {
+			t.Errorf("server %q: %d version checks, Accept %q; want 1 and %q", server, checks, accept, want)
+		}
+		srv.Close()
+	}
+}
+
+func TestAPIVersionIsCheckedAgainAfterARefusal(t *testing.T) {
+	server, checks, accept := "10", 0, ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Api-Version", server)
+		if isVersionCheck(r) {
+			checks++
+			fmt.Fprint(w, `{"results":[]}`)
+			return
+		}
+		accept = r.Header.Get("Accept")
+		if accept == "application/json; version=10" {
+			w.WriteHeader(http.StatusNotAcceptable)
+			fmt.Fprint(w, `{"detail":"Invalid version in \"Accept\" header."}`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "t")
+	if _, err := c.Task(context.Background(), "abc"); !errors.Is(err, errNotAcceptable) || !strings.Contains(err.Error(), "Invalid version") {
+		t.Fatalf("a refused version should say so, got %v", err)
+	}
+	server = "9"
+	if _, err := c.Task(context.Background(), "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 2 || accept != "application/json; version=9" {
+		t.Errorf("%d version checks, Accept %q", checks, accept)
 	}
 }
