@@ -36,6 +36,8 @@ func NewServer(drv driver.Driver, jobs *scanjobs.Manager, store *storage.Store, 
 	mux.HandleFunc("GET /api/version", s.handleVersion)
 	mux.HandleFunc("GET /api/scanner/status", s.handleScannerStatus)
 	mux.HandleFunc("GET /api/scan-options", s.handleScanOptions)
+	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
+	mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
 
 	mux.HandleFunc("POST /api/scans", s.handleStartScan)
 	mux.HandleFunc("GET /api/scans", s.handleListScans)

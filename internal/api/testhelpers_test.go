@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"image"
 	"image/draw"
@@ -20,11 +21,42 @@ import (
 )
 
 // newTestServer builds a Server against a real storage.Store in a temp
-// directory and a scanjobs.Manager wrapping drv.
+// directory, with a running scanjobs.Manager wrapping drv.
 func newTestServer(t *testing.T, drv driver.Driver) (*Server, *storage.Store) {
 	t.Helper()
-	store := storage.New(t.TempDir())
-	return NewServer(drv, scanjobs.NewManager(drv, store), store, nil, "test"), store
+	return newTestServerAt(t, drv, storage.New(t.TempDir()))
+}
+
+func newTestServerAt(t *testing.T, drv driver.Driver, store *storage.Store) (*Server, *storage.Store) {
+	t.Helper()
+	mgr := scanjobs.NewManager(drv, store)
+	mgr.Timings = scanjobs.Timings{Reconnect: 20 * time.Millisecond, ButtonPoll: 5 * time.Millisecond, Reply: 2 * time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { mgr.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return NewServer(drv, mgr, store, nil, "test"), store
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// paperWith is a session with one sheet per image waiting in the feeder.
+func paperWith(t *testing.T, images ...image.Image) *fakeSession {
+	t.Helper()
+	sess := &fakeSession{}
+	for _, img := range images {
+		sess.pages = append(sess.pages, driver.Page{Front: driver.Side{JPEG: jpegBytes(t, img), XDPI: 300, YDPI: 300}})
+	}
+	return sess
 }
 
 func do(srv *Server, method, path string, body any) *httptest.ResponseRecorder {
@@ -115,7 +147,9 @@ func seedJob(t *testing.T, store *storage.Store, id string, pages ...seedPage) s
 func runningServer(t *testing.T) (*Server, *storage.Store, string, chan struct{}) {
 	t.Helper()
 	release := make(chan struct{})
-	srv, store := newTestServer(t, &fakeDriver{session: &fakeSession{block: release}})
+	sess := paperWith(t, textImage(60, 90))
+	sess.block = release
+	srv, store := newTestServer(t, &fakeDriver{session: sess})
 	rec := do(srv, http.MethodPost, "/api/scans", nil)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("start scan: %d %s", rec.Code, rec.Body)

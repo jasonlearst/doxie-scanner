@@ -48,6 +48,14 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, err := s.jobs.StartScan(settings)
+	switch {
+	case errors.Is(err, scanjobs.ErrNoPaper):
+		writeError(w, http.StatusConflict, "no_paper", "Load paper into the scanner first.")
+		return
+	case errors.Is(err, scanjobs.ErrScannerUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "scanner_unavailable", asleepMessage)
+		return
+	}
 	if errors.Is(err, scanjobs.ErrAlreadyRunning) {
 		jobID := ""
 		if current := s.jobs.CurrentJob(); current != nil {

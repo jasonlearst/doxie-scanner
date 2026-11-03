@@ -62,26 +62,78 @@ func Validate(s storage.ScanSettings) error {
 	return nil
 }
 
-// Manager orchestrates scan jobs against a driver.Driver, persisting
-// results via a storage.Store.
+// ErrScannerUnavailable means the scanner isn't reachable: unplugged,
+// switched off, or asleep after sitting idle.
+var ErrScannerUnavailable = errors.New("the scanner is asleep or off: press its power button")
+
+// ErrNoPaper means a scan was asked for with nothing in any feeder.
+var ErrNoPaper = errors.New("load paper into the scanner first")
+
+// DeviceStatus is what the UI shows about the scanner itself.
+type DeviceStatus struct {
+	Connected bool `json:"connected"`
+	Scanning  bool `json:"scanning"`
+	Paper     bool `json:"paper"`
+	// Err is why the scanner can't be reached, while it can't.
+	Err error `json:"-"`
+}
+
+type scanRequest struct {
+	settings storage.ScanSettings
+	reply    chan scanReply // nil for button presses
+}
+
+type scanReply struct {
+	id  string
+	err error
+}
+
+// Manager owns the scanner. Run keeps a session open whenever the scanner
+// is reachable, listens for its scan button, reconnects after it sleeps,
+// and runs every scan, whether asked for by the button or by StartScan.
+// Only Run's goroutine ever touches the device.
 type Manager struct {
 	drv   driver.Driver
 	store *storage.Store
 	now   func() time.Time
 
+	Timings Timings
+
+	requests chan scanRequest
+
 	mu      sync.Mutex
 	running *JobState // most recently started job's live state (nil until the first scan)
+	device  DeviceStatus
 }
 
-// NewManager returns a Manager for the given driver and store.
+// Timings control how Run paces itself; tests shorten them.
+type Timings struct {
+	// Reconnect is how often to look for a scanner that's asleep or off.
+	Reconnect time.Duration
+	// ButtonPoll is how long each wait for the scan button lasts, and so
+	// how quickly a request from the web app is picked up.
+	ButtonPoll time.Duration
+	// Reply is how long StartScan waits for Run to take a request.
+	Reply time.Duration
+}
+
+var DefaultTimings = Timings{Reconnect: 2 * time.Second, ButtonPoll: 500 * time.Millisecond, Reply: 10 * time.Second}
+
+// NewManager returns a Manager for the given driver and store. Call Run
+// to start using the scanner.
 func NewManager(drv driver.Driver, store *storage.Store) *Manager {
-	return &Manager{drv: drv, store: store, now: time.Now}
+	return &Manager{
+		drv:      drv,
+		store:    store,
+		now:      time.Now,
+		Timings:  DefaultTimings,
+		requests: make(chan scanRequest),
+		device:   DeviceStatus{Err: errors.New("not checked yet")},
+	}
 }
 
 // CurrentJob returns a snapshot of the most recently started job's live
-// state, or nil if no scan has ever been started. Callers should treat
-// this as authoritative only while Status == storage.StatusRunning;
-// once finished, storage.Store holds the authoritative persisted record.
+// state, or nil if no scan has ever been started.
 func (m *Manager) CurrentJob() *JobState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -92,30 +144,177 @@ func (m *Manager) CurrentJob() *JobState {
 	return &cp
 }
 
-// Scanning reports whether a scan currently holds the scanner.
+// Scanning reports whether a scan is in progress.
 func (m *Manager) Scanning() bool {
 	job := m.CurrentJob()
 	return job != nil && job.Status == storage.StatusRunning
 }
 
-// StartScan begins a new scan job in the background and returns its job
-// ID immediately. Settings must already have passed Validate.
+// Device reports the scanner's last known state.
+func (m *Manager) Device() DeviceStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d := m.device
+	d.Scanning = m.running != nil && m.running.Status == storage.StatusRunning
+	return d
+}
+
+func (m *Manager) setDevice(update func(*DeviceStatus)) {
+	m.mu.Lock()
+	update(&m.device)
+	m.mu.Unlock()
+}
+
+// StartScan asks Run to scan with the given settings and returns the new
+// job's ID once the scan has started.
 func (m *Manager) StartScan(settings storage.ScanSettings) (string, error) {
 	if err := Validate(settings); err != nil {
 		return "", err
 	}
-	m.mu.Lock()
-	if m.running != nil && m.running.Status == storage.StatusRunning {
-		m.mu.Unlock()
+	if m.Scanning() {
 		return "", ErrAlreadyRunning
 	}
-	now := m.now()
-	id := storage.NewJobID(now)
-	m.running = &JobState{ID: id, Status: storage.StatusRunning}
-	m.mu.Unlock()
+	reply := make(chan scanReply, 1)
+	select {
+	case m.requests <- scanRequest{settings: settings, reply: reply}:
+	case <-time.After(m.Timings.Reply):
+		if m.Scanning() {
+			return "", ErrAlreadyRunning
+		}
+		return "", ErrScannerUnavailable
+	}
+	r := <-reply
+	return r.id, r.err
+}
 
+// ButtonSettings are what a press of the scanner's own button scans with.
+func (m *Manager) ButtonSettings() storage.ScanSettings {
+	saved, err := m.store.LoadSettings()
+	if err != nil {
+		return DefaultSettings
+	}
+	settings := WithDefaults(saved.ButtonScan)
+	if Validate(settings) != nil {
+		return DefaultSettings
+	}
+	return settings
+}
+
+// Run owns the scanner until ctx ends.
+func (m *Manager) Run(ctx context.Context) {
+	for ctx.Err() == nil {
+		sess, err := m.drv.Open(ctx)
+		if err != nil {
+			m.setDevice(func(d *DeviceStatus) { *d = DeviceStatus{Err: err} })
+			m.waitOffline(ctx)
+			continue
+		}
+		m.setDevice(func(d *DeviceStatus) { *d = DeviceStatus{Connected: true} })
+		m.serve(ctx, sess)
+		sess.Close()
+		// A session that fails straight away (say, a jam the user hasn't
+		// cleared) mustn't turn into a tight reopen loop.
+		select {
+		case <-time.After(m.Timings.Reconnect / 4):
+		case <-ctx.Done():
+		}
+	}
+}
+
+// waitOffline turns away scan requests until it's time to try the
+// scanner again.
+func (m *Manager) waitOffline(ctx context.Context) {
+	retry := time.After(m.Timings.Reconnect)
+	for {
+		select {
+		case req := <-m.requests:
+			req.respond("", ErrScannerUnavailable)
+		case <-retry:
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// serve handles requests and button presses on an open session until the
+// session fails; the caller then reconnects. A failed scan also ends it,
+// so a jam or a scanner that went to sleep mid-scan gets a fresh session.
+func (m *Manager) serve(ctx context.Context, sess driver.Session) {
+	for ctx.Err() == nil {
+		select {
+		case req := <-m.requests:
+			if m.scanOnRequest(ctx, sess, req) != nil {
+				return
+			}
+			continue
+		default:
+		}
+
+		pressed, err := sess.WaitForButton(ctx, m.Timings.ButtonPoll)
+		if err != nil {
+			return
+		}
+		if pressed {
+			if m.scanOnRequest(ctx, sess, scanRequest{settings: m.ButtonSettings()}) != nil {
+				return
+			}
+			continue
+		}
+
+		paper, err := sess.HasNextPage(ctx)
+		if err != nil {
+			return
+		}
+		m.setDevice(func(d *DeviceStatus) { d.Paper = paper })
+	}
+}
+
+func (req scanRequest) respond(id string, err error) {
+	if req.reply != nil {
+		req.reply <- scanReply{id: id, err: err}
+	}
+}
+
+// scanOnRequest starts a job if there's paper and runs it to the end. It
+// returns an error only when the session should be dropped.
+func (m *Manager) scanOnRequest(ctx context.Context, sess driver.Session, req scanRequest) error {
+	paper, err := sess.HasNextPage(ctx)
+	if err != nil {
+		req.respond("", ErrScannerUnavailable)
+		return err
+	}
+	if !paper {
+		req.respond("", ErrNoPaper)
+		return nil
+	}
+
+	meta, err := m.createJob(req.settings)
+	if err != nil {
+		req.respond("", err)
+		return nil
+	}
+	req.respond(meta.ID, nil)
+
+	err = m.run(ctx, sess, meta)
+	m.drainButton(ctx, sess)
+	return err
+}
+
+// drainButton discards presses made while a scan was running, so a
+// queued press doesn't start a second scan the moment the first ends.
+func (m *Manager) drainButton(ctx context.Context, sess driver.Session) {
+	for i := 0; i < 3; i++ {
+		if pressed, err := sess.WaitForButton(ctx, 20*time.Millisecond); err != nil || !pressed {
+			return
+		}
+	}
+}
+
+func (m *Manager) createJob(settings storage.ScanSettings) (storage.JobMeta, error) {
+	now := m.now()
 	meta := storage.JobMeta{
-		ID:        id,
+		ID:        storage.NewJobID(now),
 		Name:      storage.NewJobName(now),
 		Driver:    m.drv.Info().Name,
 		CreatedAt: now,
@@ -124,27 +323,16 @@ func (m *Manager) StartScan(settings storage.ScanSettings) (string, error) {
 		Pages:     []storage.PageMeta{},
 	}
 	if err := m.store.CreateJob(meta); err != nil {
-		m.mu.Lock()
-		m.running.Status = storage.StatusFailed
-		m.running.Err = err
-		m.mu.Unlock()
-		return "", fmt.Errorf("scanjobs: create job: %w", err)
+		return meta, fmt.Errorf("scanjobs: create job: %w", err)
 	}
-
-	// The scan must outlive whatever request triggered it.
-	go m.run(context.Background(), id, meta)
-
-	return id, nil
+	m.mu.Lock()
+	m.running = &JobState{ID: meta.ID, Status: storage.StatusRunning}
+	m.mu.Unlock()
+	return meta, nil
 }
 
-func (m *Manager) run(ctx context.Context, id string, meta storage.JobMeta) {
-	sess, err := m.drv.Open(ctx)
-	if err != nil {
-		m.finish(id, &meta, err)
-		return
-	}
-	defer sess.Close()
-
+// run scans sheets until the feeders are empty and records the outcome.
+func (m *Manager) run(ctx context.Context, sess driver.Session, meta storage.JobMeta) error {
 	opts := driver.ScanOptions{
 		Duplex:     meta.Settings.Sides != SidesSingle,
 		Resolution: meta.Settings.Resolution,
@@ -152,30 +340,26 @@ func (m *Manager) run(ctx context.Context, id string, meta storage.JobMeta) {
 	for sheet := 1; ; sheet++ {
 		hasNext, err := sess.HasNextPage(ctx)
 		if err != nil {
-			m.finish(id, &meta, err)
-			return
+			return m.finish(&meta, err)
 		}
 		if !hasNext {
-			break
+			return m.finish(&meta, nil)
 		}
 
 		scanned, err := sess.ScanPage(ctx, opts)
 		if err != nil {
-			m.finish(id, &meta, err)
-			return
+			return m.finish(&meta, err)
 		}
 
-		front, err := m.addSide(id, sheet, "front", scanned.Front, meta.Settings)
+		front, err := m.addSide(meta.ID, sheet, "front", scanned.Front, meta.Settings)
 		if err != nil {
-			m.finish(id, &meta, err)
-			return
+			return m.finish(&meta, err)
 		}
 		meta.Pages = append(meta.Pages, front)
 		if scanned.Back != nil {
-			back, err := m.addSide(id, sheet, "back", *scanned.Back, meta.Settings)
+			back, err := m.addSide(meta.ID, sheet, "back", *scanned.Back, meta.Settings)
 			if err != nil {
-				m.finish(id, &meta, err)
-				return
+				return m.finish(&meta, err)
 			}
 			meta.Pages = append(meta.Pages, back)
 		}
@@ -183,13 +367,9 @@ func (m *Manager) run(ctx context.Context, id string, meta storage.JobMeta) {
 		_ = m.store.SaveMeta(meta) // best-effort checkpoint; the final save happens regardless
 
 		m.mu.Lock()
-		if m.running != nil && m.running.ID == id {
-			m.running.PagesScanned = len(meta.VisiblePages())
-		}
+		m.running.PagesScanned = len(meta.VisiblePages())
 		m.mu.Unlock()
 	}
-
-	m.finish(id, &meta, nil)
 }
 
 // addSide stores the scanner's JPEG untouched, then decodes it once to
@@ -232,8 +412,8 @@ func (m *Manager) addSide(jobID string, sheet int, side string, s driver.Side, s
 }
 
 // finish records a job's terminal state, both in the persisted metadata
-// and the in-memory live state.
-func (m *Manager) finish(id string, meta *storage.JobMeta, runErr error) {
+// and the in-memory live state, and passes runErr through.
+func (m *Manager) finish(meta *storage.JobMeta, runErr error) error {
 	now := m.now()
 	meta.CompletedAt = &now
 	if runErr != nil {
@@ -245,9 +425,8 @@ func (m *Manager) finish(id string, meta *storage.JobMeta, runErr error) {
 	_ = m.store.SaveMeta(*meta)
 
 	m.mu.Lock()
-	if m.running != nil && m.running.ID == id {
-		m.running.Status = meta.Status
-		m.running.Err = runErr
-	}
+	m.running.Status = meta.Status
+	m.running.Err = runErr
 	m.mu.Unlock()
+	return runErr
 }

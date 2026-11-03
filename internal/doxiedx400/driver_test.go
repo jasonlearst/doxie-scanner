@@ -36,27 +36,10 @@ func TestDriverInfo(t *testing.T) {
 	}
 }
 
-func TestDetect(t *testing.T) {
-	dev := &fakeDevice{t: t}
-	withFakeOpenDevice(t, dev, nil)
-	if err := New().Detect(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !dev.closed {
-		t.Error("Detect should close the device after probing")
-	}
-
+func TestOpenError(t *testing.T) {
 	withFakeOpenDevice(t, nil, errors.New("no device"))
-	if err := New().Detect(context.Background()); err == nil {
-		t.Error("expected the open error")
-	}
 	if _, err := New().Open(context.Background()); err == nil {
-		t.Error("expected the open error from Open too")
-	}
-
-	withFakeOpenDevice(t, &fakeDevice{t: t, closeErr: errors.New("close failed")}, nil)
-	if err := New().Detect(context.Background()); err == nil {
-		t.Error("expected the close error")
+		t.Error("expected the open error")
 	}
 }
 

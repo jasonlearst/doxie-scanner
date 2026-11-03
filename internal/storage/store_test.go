@@ -374,3 +374,34 @@ func TestStore_DeleteRenders_Error(t *testing.T) {
 		t.Fatal("expected an error when a cached file can't be removed")
 	}
 }
+
+func TestStore_Settings(t *testing.T) {
+	s := New(t.TempDir())
+	if got, err := s.LoadSettings(); err != nil || got != (AppSettings{}) {
+		t.Fatalf("no file yet should give zero settings, got %+v %v", got, err)
+	}
+	want := AppSettings{ButtonScan: ScanSettings{Resolution: 600, Sides: "double", Color: "gray"}}
+	if err := s.SaveSettings(want); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.LoadSettings(); err != nil || got != want {
+		t.Errorf("round trip: got %+v %v", got, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(s.Root(), "settings.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSettings(); err == nil {
+		t.Error("corrupt settings should fail to load")
+	}
+	if err := os.Chmod(filepath.Join(s.Root(), "settings.json"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(s.Root(), "settings.json"), 0o644) })
+	if _, err := s.LoadSettings(); err == nil {
+		t.Error("unreadable settings should fail to load")
+	}
+	if err := s.SaveSettings(want); err == nil {
+		t.Error("unwritable settings should fail to save")
+	}
+}

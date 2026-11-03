@@ -7,7 +7,10 @@
 // directly.
 package driver
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Info describes a driver for display/diagnostic purposes.
 type Info struct {
@@ -56,6 +59,9 @@ type Session interface {
 	// ScanPage scans the next sheet. Callers must have confirmed
 	// HasNextPage first.
 	ScanPage(ctx context.Context, opts ScanOptions) (Page, error)
+	// WaitForButton waits up to timeout for the scanner's own scan button
+	// and reports whether it was pressed.
+	WaitForButton(ctx context.Context, timeout time.Duration) (bool, error)
 	// Close releases the underlying device.
 	Close() error
 }
@@ -63,12 +69,7 @@ type Session interface {
 // Driver is a scanner model implementation.
 type Driver interface {
 	Info() Info
-	// Detect reports whether the scanner is currently present and
-	// reachable, without starting a scan session. Used for the
-	// connected/disconnected status indicator.
-	Detect(ctx context.Context) error
-	// Open opens a session for scanning. Callers should call Detect
-	// first if they want a clean "not connected" error distinct from an
-	// Open-time failure, though Open may return the same error types.
+	// Open opens a session; it fails while the scanner is unplugged, off,
+	// or asleep.
 	Open(ctx context.Context) (Session, error)
 }

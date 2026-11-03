@@ -2,6 +2,7 @@ package doxiedx400
 
 import (
 	"context"
+	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
 	"github.com/andiapps-dev/doxie-scanner/internal/scsiusb"
@@ -30,15 +31,7 @@ func (d *dxDriver) Info() driver.Info {
 
 // openDeviceFunc is swapped out by tests for a fake device.
 var openDeviceFunc = func() (scsiusb.BulkDevice, error) {
-	return scsiusb.Open(VID, PID, usbInterfaceNum, epBulkIn&0x0f, epBulkOut&0x0f)
-}
-
-func (d *dxDriver) Detect(ctx context.Context) error {
-	dev, err := openDeviceFunc()
-	if err != nil {
-		return err
-	}
-	return dev.Close()
+	return scsiusb.Open(VID, PID, usbInterfaceNum, epBulkIn&0x0f, epBulkOut&0x0f, epInterrupt&0x0f)
 }
 
 func (d *dxDriver) Open(ctx context.Context) (driver.Session, error) {
@@ -78,6 +71,26 @@ func (s *session) ScanPage(ctx context.Context, opts driver.ScanOptions) (driver
 		page.Back = &back
 	}
 	return page, nil
+}
+
+// WaitForButton listens on the interrupt pipe, where a press arrives as
+// an 8-byte packet whose first byte has the 0x80 "pressed" flag set.
+func (s *session) WaitForButton(ctx context.Context, timeout time.Duration) (bool, error) {
+	ir, ok := s.dev.(scsiusb.InterruptReader)
+	if !ok {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	buf := make([]byte, buttonPacketLen)
+	n, err := ir.ReadInterrupt(ctx, buf)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, nil
+		}
+		return false, err
+	}
+	return n > 0 && buf[0]&buttonPressed != 0, nil
 }
 
 func (s *session) Close() error {

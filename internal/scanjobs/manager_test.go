@@ -3,6 +3,7 @@ package scanjobs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/draw"
@@ -44,37 +45,47 @@ func sheet(front driver.Side, back *driver.Side) driver.Page {
 	return driver.Page{Front: front, Back: back}
 }
 
-func waitForJobDone(t *testing.T, m *Manager) *JobState {
+func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	// Generous margin: a throttled CI runner can starve the background
+	// Generous margin: a throttled CI runner can starve the manager's
 	// goroutine well past what these fakes need locally.
 	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		state := m.CurrentJob()
-		if state != nil && state.Status != storage.StatusRunning {
-			return state
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("timed out waiting for job to finish")
-	return nil
 }
 
-func newTestManager(t *testing.T, drv driver.Driver) (*Manager, *storage.Store) {
+// startManager runs a Manager with fast timings until the test ends.
+func startManager(t *testing.T, drv *fakeDriver) (*Manager, *storage.Store) {
 	t.Helper()
 	store := storage.New(t.TempDir())
-	return NewManager(drv, store), store
+	m := NewManager(drv, store)
+	m.Timings = Timings{Reconnect: 20 * time.Millisecond, ButtonPoll: 5 * time.Millisecond, Reply: 2 * time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { m.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return m, store
+}
+
+func finished(t *testing.T, m *Manager) *JobState {
+	t.Helper()
+	waitFor(t, "the scan to finish", func() bool { return m.CurrentJob() != nil && !m.Scanning() })
+	return m.CurrentJob()
 }
 
 func scan(t *testing.T, settings storage.ScanSettings, sheets ...driver.Page) (*fakeSession, storage.JobMeta, *storage.Store) {
 	t.Helper()
 	sess := &fakeSession{pages: sheets}
-	m, store := newTestManager(t, &fakeDriver{info: driver.Info{Name: "doxie-dx400"}, session: sess})
+	m, store := startManager(t, &fakeDriver{info: driver.Info{Name: "doxie-dx400"}, session: sess})
 	id, err := m.StartScan(WithDefaults(settings))
 	if err != nil {
 		t.Fatalf("StartScan: %v", err)
 	}
-	if state := waitForJobDone(t, m); state.Status != storage.StatusCompleted {
+	if state := finished(t, m); state.Status != storage.StatusCompleted {
 		t.Fatalf("status %v: %v", state.Status, state.Err)
 	}
 	meta, err := store.LoadMeta(id)
@@ -103,7 +114,7 @@ func TestValidateAndDefaults(t *testing.T) {
 }
 
 func TestStartScan_RejectsInvalidSettingsWithoutCreatingAJob(t *testing.T) {
-	m, store := newTestManager(t, &fakeDriver{session: &fakeSession{}})
+	m, store := startManager(t, &fakeDriver{session: &fakeSession{}})
 	if _, err := m.StartScan(storage.ScanSettings{Resolution: 150, Sides: SidesAuto, Color: ColorAuto}); err == nil {
 		t.Fatal("expected an error")
 	}
@@ -112,10 +123,13 @@ func TestStartScan_RejectsInvalidSettingsWithoutCreatingAJob(t *testing.T) {
 	}
 }
 
-func TestScan_ZeroSheets(t *testing.T) {
-	sess, meta, _ := scan(t, storage.ScanSettings{})
-	if len(meta.Pages) != 0 || meta.Status != storage.StatusCompleted || !sess.closed {
-		t.Errorf("meta %+v, session closed=%v", meta, sess.closed)
+func TestStartScan_NoPaperCreatesNoJob(t *testing.T) {
+	m, store := startManager(t, &fakeDriver{session: &fakeSession{}})
+	if _, err := m.StartScan(DefaultSettings); !errors.Is(err, ErrNoPaper) {
+		t.Fatalf("got %v, want ErrNoPaper", err)
+	}
+	if jobs, _ := store.ListJobs(); len(jobs) != 0 {
+		t.Errorf("an empty feeder must not leave an empty job behind, got %d", len(jobs))
 	}
 }
 
@@ -209,9 +223,11 @@ func TestScan_NonSquare200dpiIsSquaredUp(t *testing.T) {
 }
 
 func TestStartScan_AlreadyRunning(t *testing.T) {
-	m, _ := newTestManager(t, &fakeDriver{session: &fakeSession{}})
+	m, _ := startManager(t, &fakeDriver{session: &fakeSession{}})
+	m.mu.Lock()
 	m.running = &JobState{ID: "existing-job", Status: storage.StatusRunning}
-	if !m.Scanning() {
+	m.mu.Unlock()
+	if !m.Scanning() || !m.Device().Scanning {
 		t.Error("Scanning should report the running job")
 	}
 	if _, err := m.StartScan(DefaultSettings); err != ErrAlreadyRunning {
@@ -219,21 +235,124 @@ func TestStartScan_AlreadyRunning(t *testing.T) {
 	}
 }
 
+func TestStartScan_TimesOutWithoutRun(t *testing.T) {
+	m := NewManager(&fakeDriver{session: &fakeSession{}}, storage.New(t.TempDir()))
+	m.Timings.Reply = 10 * time.Millisecond
+	if _, err := m.StartScan(DefaultSettings); !errors.Is(err, ErrScannerUnavailable) {
+		t.Errorf("nobody owns the scanner: got %v", err)
+	}
+}
+
 func TestCurrentJob_NilBeforeAnyScan(t *testing.T) {
-	m, _ := newTestManager(t, &fakeDriver{session: &fakeSession{}})
+	m, _ := startManager(t, &fakeDriver{session: &fakeSession{}})
 	if m.CurrentJob() != nil || m.Scanning() {
 		t.Error("expected no job before any scan has started")
 	}
 }
 
-func failedScan(t *testing.T, drv *fakeDriver) (*JobState, storage.JobMeta) {
+func TestRun_SleepingScannerIsReportedAndRecovered(t *testing.T) {
+	drv := &fakeDriver{session: &fakeSession{}, offline: errTest("no USB device")}
+	m, _ := startManager(t, drv)
+
+	waitFor(t, "an offline status", func() bool { return m.Device().Err == errTest("no USB device") })
+	if m.Device().Connected {
+		t.Error("a sleeping scanner is not connected")
+	}
+	if _, err := m.StartScan(DefaultSettings); !errors.Is(err, ErrScannerUnavailable) {
+		t.Errorf("scanning while asleep: got %v", err)
+	}
+
+	before := drv.openCount()
+	waitFor(t, "a retry", func() bool { return drv.openCount() > before })
+	drv.setOffline(nil)
+	waitFor(t, "the scanner to reconnect", func() bool { return m.Device().Connected })
+}
+
+func TestRun_TracksPaper(t *testing.T) {
+	sess := &fakeSession{}
+	m, _ := startManager(t, &fakeDriver{session: sess})
+	waitFor(t, "the scanner to connect", func() bool { return m.Device().Connected })
+	sess.setPages(sheet(side(t, textPage()), nil))
+	waitFor(t, "paper to be noticed", func() bool { return m.Device().Paper })
+}
+
+func TestRun_ButtonScansWithSavedSettings(t *testing.T) {
+	sess := &fakeSession{pages: []driver.Page{sheet(side(t, textPage()), nil)}, pressDuringScan: true}
+	m, store := startManager(t, &fakeDriver{session: sess})
+	if err := store.SaveSettings(storage.AppSettings{ButtonScan: storage.ScanSettings{Resolution: 600, Sides: SidesSingle}}); err != nil {
+		t.Fatal(err)
+	}
+
+	sess.press()
+	state := finished(t, m)
+	meta, err := store.LoadMeta(state.ID)
+	if err != nil || len(meta.Pages) != 1 {
+		t.Fatalf("button scan: %+v %v", meta, err)
+	}
+	if meta.Settings != (storage.ScanSettings{Resolution: 600, Sides: SidesSingle, Color: ColorAuto}) {
+		t.Errorf("button scans use the saved settings, got %+v", meta.Settings)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if jobs, _ := store.ListJobs(); len(jobs) != 1 {
+		t.Errorf("a press made during the scan must not start another one, got %d jobs", len(jobs))
+	}
+}
+
+func TestRun_ButtonWithoutPaperDoesNothing(t *testing.T) {
+	sess := &fakeSession{}
+	m, store := startManager(t, &fakeDriver{session: sess})
+	waitFor(t, "the scanner to connect", func() bool { return m.Device().Connected })
+	sess.press()
+	time.Sleep(50 * time.Millisecond)
+	if jobs, _ := store.ListJobs(); len(jobs) != 0 || m.CurrentJob() != nil {
+		t.Errorf("a press with an empty feeder must not create a job, got %d", len(jobs))
+	}
+}
+
+func TestButtonSettings_FallBackToDefaults(t *testing.T) {
+	store := storage.New(t.TempDir())
+	m := NewManager(&fakeDriver{}, store)
+	if m.ButtonSettings() != DefaultSettings {
+		t.Error("no saved settings means the defaults")
+	}
+	if err := store.SaveSettings(storage.AppSettings{ButtonScan: storage.ScanSettings{Resolution: 150}}); err != nil {
+		t.Fatal(err)
+	}
+	if m.ButtonSettings() != DefaultSettings {
+		t.Error("invalid saved settings fall back to the defaults")
+	}
+	if err := os.WriteFile(store.Root()+"/settings.json", []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if m.ButtonSettings() != DefaultSettings {
+		t.Error("unreadable settings fall back to the defaults")
+	}
+}
+
+func TestRun_SessionErrorsReconnect(t *testing.T) {
+	for name, sess := range map[string]*fakeSession{
+		"button": {buttonErr: errTest("pipe stalled")},
+		"sensor": {hasNextErr: errTest("sensor failed")},
+	} {
+		drv := &fakeDriver{session: sess}
+		m, _ := startManager(t, drv)
+		waitFor(t, name+" reconnects", func() bool { return drv.openCount() >= 3 })
+		if _, err := m.StartScan(DefaultSettings); err == nil {
+			t.Errorf("%s: a scan on a failing session should not succeed", name)
+		}
+	}
+}
+
+func failedScan(t *testing.T, sess *fakeSession) (*JobState, storage.JobMeta) {
 	t.Helper()
-	m, store := newTestManager(t, drv)
+	drv := &fakeDriver{session: sess}
+	m, store := startManager(t, drv)
 	id, err := m.StartScan(DefaultSettings)
 	if err != nil {
-		t.Fatalf("StartScan should succeed even though the background run fails: %v", err)
+		t.Fatalf("StartScan: %v", err)
 	}
-	state := waitForJobDone(t, m)
+	state := finished(t, m)
 	if state.Status != storage.StatusFailed || state.Err == nil {
 		t.Fatalf("expected a failed job, got %v (%v)", state.Status, state.Err)
 	}
@@ -244,27 +363,24 @@ func failedScan(t *testing.T, drv *fakeDriver) (*JobState, storage.JobMeta) {
 	if meta.Status != storage.StatusFailed || meta.Error == "" {
 		t.Errorf("meta: %+v", meta)
 	}
+	waitFor(t, "a fresh session after the failure", func() bool { return drv.openCount() >= 2 })
 	return state, meta
 }
 
 func TestScan_Failures(t *testing.T) {
-	failedScan(t, &fakeDriver{openErr: errTest("no device")})
-	failedScan(t, &fakeDriver{session: &fakeSession{hasNextErr: errTest("sensor failed")}})
-
 	undecodable := driver.Side{JPEG: []byte("not a jpeg"), XDPI: 300, YDPI: 300}
-	failedScan(t, &fakeDriver{session: &fakeSession{pages: []driver.Page{sheet(undecodable, nil)}}})
-
 	good := side(t, textPage())
-	failedScan(t, &fakeDriver{session: &fakeSession{pages: []driver.Page{sheet(good, &undecodable)}}})
+	failedScan(t, &fakeSession{pages: []driver.Page{sheet(undecodable, nil)}})
+	failedScan(t, &fakeSession{pages: []driver.Page{sheet(good, &undecodable)}})
 }
 
 func TestScan_FailureMidLoopKeepsEarlierPages(t *testing.T) {
 	good := side(t, textPage())
-	state, meta := failedScan(t, &fakeDriver{session: &fakeSession{
+	state, meta := failedScan(t, &fakeSession{
 		pages:     []driver.Page{sheet(good, nil), sheet(good, nil)},
 		scanErr:   errTest("paper jam"),
 		scanErrAt: 2,
-	}})
+	})
 	if state.PagesScanned != 1 || len(meta.Pages) != 1 {
 		t.Errorf("sheet 1 should be kept: scanned=%d pages=%d", state.PagesScanned, len(meta.Pages))
 	}
@@ -275,12 +391,14 @@ func TestStartScan_CreateJobError(t *testing.T) {
 	if err := os.WriteFile(badRoot, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(&fakeDriver{session: &fakeSession{}}, storage.New(badRoot+"/data"))
+	drv := &fakeDriver{session: &fakeSession{pages: []driver.Page{sheet(side(t, textPage()), nil)}}}
+	m := NewManager(drv, storage.New(badRoot+"/data"))
+	m.Timings = Timings{Reconnect: 20 * time.Millisecond, ButtonPoll: 5 * time.Millisecond, Reply: 2 * time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
 	if _, err := m.StartScan(DefaultSettings); err == nil {
 		t.Fatal("expected an error")
-	}
-	if state := m.CurrentJob(); state == nil || state.Status != storage.StatusFailed {
-		t.Errorf("state: %+v", state)
 	}
 }
 
@@ -288,24 +406,23 @@ func TestScan_SavePageError(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permission-based test is unreliable")
 	}
-	drv := &fakeDriver{session: &fakeSession{pages: []driver.Page{sheet(side(t, textPage()), nil)}}}
-	m, store := newTestManager(t, drv)
+	sess := &fakeSession{pages: []driver.Page{sheet(side(t, textPage()), nil)}}
+	store := storage.New(t.TempDir())
+	m := NewManager(&fakeDriver{session: sess}, store)
 
-	// Drive run() synchronously so the pages directory can be made
-	// unwritable before the scan touches it.
-	now := time.Now()
-	meta := storage.JobMeta{ID: storage.NewJobID(now), CreatedAt: now, Status: storage.StatusRunning, Settings: DefaultSettings}
-	if err := store.CreateJob(meta); err != nil {
+	meta, err := m.createJob(DefaultSettings)
+	if err != nil {
 		t.Fatal(err)
 	}
-	m.running = &JobState{ID: meta.ID, Status: storage.StatusRunning}
 	pagesDir := store.Root() + "/jobs/" + meta.ID + "/pages"
 	if err := os.Chmod(pagesDir, 0o555); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Chmod(pagesDir, 0o755)
 
-	m.run(context.Background(), meta.ID, meta)
+	if err := m.run(context.Background(), sess, meta); err == nil {
+		t.Fatal("expected the save failure to surface")
+	}
 	if state := m.CurrentJob(); state.Status != storage.StatusFailed {
 		t.Fatalf("status: got %v (err=%v)", state.Status, state.Err)
 	}

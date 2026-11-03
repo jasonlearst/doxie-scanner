@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
+	"github.com/andiapps-dev/doxie-scanner/internal/scsiusb"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
 
@@ -31,7 +32,7 @@ func TestScanOptions(t *testing.T) {
 }
 
 func TestStartScan_EmptyBodyUsesDefaults(t *testing.T) {
-	srv, store := newTestServer(t, &fakeDriver{session: &fakeSession{}})
+	srv, store := newTestServer(t, &fakeDriver{session: paperWith(t, textImage(60, 90))})
 	rec := do(srv, http.MethodPost, "/api/scans", nil)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
@@ -45,7 +46,7 @@ func TestStartScan_EmptyBodyUsesDefaults(t *testing.T) {
 }
 
 func TestStartScan_PartialSettingsKeepTheRestDefault(t *testing.T) {
-	srv, store := newTestServer(t, &fakeDriver{session: &fakeSession{}})
+	srv, store := newTestServer(t, &fakeDriver{session: paperWith(t, textImage(60, 90))})
 	id := decode[startScanResponse](t, do(srv, http.MethodPost, "/api/scans", map[string]any{"resolution": 600, "color": "gray"})).JobID
 	waitDone(t, srv)
 	meta, _ := store.LoadMeta(id)
@@ -55,7 +56,7 @@ func TestStartScan_PartialSettingsKeepTheRestDefault(t *testing.T) {
 }
 
 func TestStartScan_Rejections(t *testing.T) {
-	srv, _ := newTestServer(t, &fakeDriver{session: &fakeSession{}})
+	srv, _ := newTestServer(t, &fakeDriver{})
 	for _, body := range []any{"{not json", map[string]any{"resolution": 150}, map[string]any{"sides": "both"}} {
 		if rec := do(srv, http.MethodPost, "/api/scans", body); rec.Code != http.StatusBadRequest {
 			t.Errorf("%v: status %d", body, rec.Code)
@@ -76,11 +77,30 @@ func TestStartScan_StorageFailure(t *testing.T) {
 	if err := os.WriteFile(root, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	drv := &fakeDriver{session: &fakeSession{}}
-	store := storage.New(root)
-	srv := NewServer(drv, scanjobs.NewManager(drv, store), store, nil, "test")
+	srv, _ := newTestServerAt(t, &fakeDriver{session: paperWith(t, textImage(60, 90))}, storage.New(root))
 	if rec := do(srv, http.MethodPost, "/api/scans", nil); rec.Code != http.StatusInternalServerError {
 		t.Errorf("status %d", rec.Code)
+	}
+}
+
+func TestStartScan_NoPaper(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	waitFor(t, "connected", func() bool { return srv.jobs.Device().Connected })
+	rec := do(srv, http.MethodPost, "/api/scans", nil)
+	if rec.Code != http.StatusConflict || decode[errorEnvelope](t, rec).Error.Code != "no_paper" {
+		t.Errorf("status %d %s", rec.Code, rec.Body)
+	}
+	if jobs, _ := store.ListJobs(); len(jobs) != 0 {
+		t.Error("no job should be created without paper")
+	}
+}
+
+func TestStartScan_ScannerAsleep(t *testing.T) {
+	srv, _ := newTestServer(t, &fakeDriver{openErr: &scsiusb.ErrDeviceNotFound{}})
+	waitFor(t, "the loop to notice", func() bool { return srv.jobs.Device().Err != nil })
+	rec := do(srv, http.MethodPost, "/api/scans", nil)
+	if rec.Code != http.StatusServiceUnavailable || decode[errorEnvelope](t, rec).Error.Message != asleepMessage {
+		t.Errorf("status %d %s", rec.Code, rec.Body)
 	}
 }
 

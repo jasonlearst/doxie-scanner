@@ -189,3 +189,40 @@ func (s *Store) DeleteJob(id string) error {
 	}
 	return nil
 }
+
+// AppSettings are the user's saved preferences.
+type AppSettings struct {
+	// ButtonScan is what the scanner's own scan button does.
+	ButtonScan ScanSettings `json:"buttonScan"`
+}
+
+func (s *Store) settingsPath() string { return filepath.Join(s.root, "settings.json") }
+
+// LoadSettings returns the saved settings, or the zero value if none have
+// been saved yet.
+func (s *Store) LoadSettings() (AppSettings, error) {
+	var settings AppSettings
+	data, err := os.ReadFile(s.settingsPath())
+	if os.IsNotExist(err) {
+		return settings, nil
+	}
+	if err != nil {
+		return settings, fmt.Errorf("storage: read settings: %w", err)
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return settings, fmt.Errorf("storage: parse settings: %w", err)
+	}
+	return settings, nil
+}
+
+// SaveSettings writes the settings.
+func (s *Store) SaveSettings(settings AppSettings) error {
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("storage: marshal settings: %w", err)
+	}
+	if err := os.WriteFile(s.settingsPath(), data, 0o644); err != nil {
+		return fmt.Errorf("storage: write settings: %w", err)
+	}
+	return nil
+}

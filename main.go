@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -49,6 +50,7 @@ func main() {
 	}
 
 	mgr := scanjobs.NewManager(drv, store)
+	go mgr.Run(context.Background())
 	srv := api.NewServer(drv, mgr, store, web.FS(), version)
 
 	log.Printf("doxie-scanner %s listening on %s (driver=%s)", version, cfg.ListenAddr, cfg.DriverName)

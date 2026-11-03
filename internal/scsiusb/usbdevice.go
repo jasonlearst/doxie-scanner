@@ -1,6 +1,7 @@
 package scsiusb
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 
@@ -21,6 +22,7 @@ type USBDevice struct {
 	intf  *gousb.Interface
 	inEP  *gousb.InEndpoint
 	outEP *gousb.OutEndpoint
+	intEP *gousb.InEndpoint
 }
 
 // Open finds a USB device by VID/PID, claims its interface, and returns a
@@ -37,17 +39,17 @@ type USBDevice struct {
 // programming error, so it's recovered here and reported the same way as
 // every other "couldn't get at the device" failure instead of crashing
 // the calling HTTP request.
-func Open(vid, pid uint16, interfaceNum, inEPNum, outEPNum int) (result *USBDevice, err error) {
+func Open(vid, pid uint16, interfaceNum, inEPNum, outEPNum, intEPNum int) (result *USBDevice, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			result = nil
 			err = &ErrClaimInterface{Cause: fmt.Errorf("libusb initialization failed: %v", r)}
 		}
 	}()
-	return openDevice(vid, pid, interfaceNum, inEPNum, outEPNum)
+	return openDevice(vid, pid, interfaceNum, inEPNum, outEPNum, intEPNum)
 }
 
-func openDevice(vid, pid uint16, interfaceNum, inEPNum, outEPNum int) (*USBDevice, error) {
+func openDevice(vid, pid uint16, interfaceNum, inEPNum, outEPNum, intEPNum int) (*USBDevice, error) {
 	ctx := gousb.NewContext()
 
 	dev, err := ctx.OpenDeviceWithVIDPID(gousb.ID(vid), gousb.ID(pid))
@@ -111,7 +113,16 @@ func openDevice(vid, pid uint16, interfaceNum, inEPNum, outEPNum int) (*USBDevic
 		return nil, &ErrClaimInterface{Cause: fmt.Errorf("open out-endpoint %d: %w", outEPNum, err)}
 	}
 
-	return &USBDevice{ctx: ctx, dev: dev, cfg: cfg, intf: intf, inEP: inEP, outEP: outEP}, nil
+	intEP, err := intf.InEndpoint(intEPNum)
+	if err != nil {
+		intf.Close()
+		cfg.Close()
+		dev.Close()
+		ctx.Close()
+		return nil, &ErrClaimInterface{Cause: fmt.Errorf("open interrupt endpoint %d: %w", intEPNum, err)}
+	}
+
+	return &USBDevice{ctx: ctx, dev: dev, cfg: cfg, intf: intf, inEP: inEP, outEP: outEP, intEP: intEP}, nil
 }
 
 func firstConfigNumber(dev *gousb.Device) (int, error) {
@@ -141,6 +152,12 @@ func (u *USBDevice) SendCommand(cdb []byte) error {
 
 func (u *USBDevice) Write(p []byte) (int, error) { return u.outEP.Write(p) }
 func (u *USBDevice) Read(p []byte) (int, error)  { return u.inEP.Read(p) }
+
+// ReadInterrupt waits on the interrupt IN pipe until a packet arrives or
+// ctx ends.
+func (u *USBDevice) ReadInterrupt(ctx context.Context, p []byte) (int, error) {
+	return u.intEP.ReadContext(ctx, p)
+}
 
 func (u *USBDevice) Close() error {
 	u.intf.Close()
