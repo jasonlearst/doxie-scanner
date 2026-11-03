@@ -27,6 +27,8 @@ type ScanOptions struct {
 	// this; drivers that don't should simply ignore it and always scan
 	// simplex.
 	Duplex bool
+	// Resolution in dpi; zero means the driver's default.
+	Resolution int
 }
 
 // Page is the result of scanning one physical sheet.

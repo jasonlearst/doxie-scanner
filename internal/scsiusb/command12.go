@@ -46,7 +46,7 @@ func Command12(dev BulkDevice, cdb, outData []byte, inLen int, retries int, retr
 		if attempt > 0 {
 			time.Sleep(retryDelay)
 		}
-		if err := writeAll(dev, cdb); err != nil {
+		if err := sendCDB(dev, cdb); err != nil {
 			lastErr = err
 			continue
 		}
@@ -102,8 +102,15 @@ func readStatus12(dev BulkDevice) ([]byte, error) {
 	return buf, nil
 }
 
+func sendCDB(dev BulkDevice, cdb []byte) error {
+	if s, ok := dev.(CommandSender); ok {
+		return s.SendCommand(cdb)
+	}
+	return writeAll(dev, cdb)
+}
+
 func requestSense12(dev BulkDevice) ([]byte, error) {
-	if err := writeAll(dev, CDB12(sense12Op, 0, Sense12Len, 0)); err != nil {
+	if err := sendCDB(dev, CDB12(sense12Op, 0, Sense12Len, 0)); err != nil {
 		return nil, err
 	}
 	sense, err := readExact(dev, Sense12Len)

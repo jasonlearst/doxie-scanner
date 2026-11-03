@@ -2,6 +2,7 @@ package scsiusb
 
 import (
 	"fmt"
+	"runtime"
 
 	"github.com/google/gousb"
 )
@@ -59,10 +60,15 @@ func openDevice(vid, pid uint16, interfaceNum, inEPNum, outEPNum int) (*USBDevic
 		return nil, &ErrDeviceNotFound{VID: vid, PID: pid}
 	}
 
-	if err := dev.SetAutoDetach(true); err != nil {
-		dev.Close()
-		ctx.Close()
-		return nil, &ErrClaimInterface{Cause: fmt.Errorf("set auto detach: %w", err)}
+	// Detaching a kernel driver needs root on macOS, where nothing is bound
+	// to this interface anyway; on Linux it guards against usblp-style
+	// drivers grabbing the scanner.
+	if runtime.GOOS == "linux" {
+		if err := dev.SetAutoDetach(true); err != nil {
+			dev.Close()
+			ctx.Close()
+			return nil, &ErrClaimInterface{Cause: fmt.Errorf("set auto detach: %w", err)}
+		}
 	}
 
 	cfgNum, err := firstConfigNumber(dev)
@@ -113,6 +119,24 @@ func firstConfigNumber(dev *gousb.Device) (int, error) {
 		return num, nil
 	}
 	return 0, fmt.Errorf("device reports no USB configurations")
+}
+
+const (
+	vendorOutToDevice = 0x40
+	vendorCommandReq  = 0x04
+)
+
+// SendCommand delivers a CDB as the vendor control request Doxie's own
+// driver uses (bmRequestType 0x40, bRequest 4).
+func (u *USBDevice) SendCommand(cdb []byte) error {
+	n, err := u.dev.Control(vendorOutToDevice, vendorCommandReq, 0, 0, cdb)
+	if err != nil {
+		return err
+	}
+	if n != len(cdb) {
+		return &ScsiError{Opcode: cdb[0], Message: fmt.Sprintf("control transfer sent %d of %d bytes", n, len(cdb))}
+	}
+	return nil
 }
 
 func (u *USBDevice) Write(p []byte) (int, error) { return u.outEP.Write(p) }

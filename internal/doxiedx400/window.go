@@ -42,6 +42,7 @@ var SupportedResolutions = []int{200, 300, 600}
 
 type window struct {
 	xRes, yRes   int
+	width        int
 	pixels       int
 	lines        int
 	bytesPerLine int
@@ -58,10 +59,12 @@ func newWindow(res int, duplex bool) (window, error) {
 	default:
 		return window{}, fmt.Errorf("unsupported resolution %d dpi (want one of %v)", res, SupportedResolutions)
 	}
-	pixels := alignUp(maxWidthAtBase*xRes/baseRes, pixelAlign)
+	width := maxWidthAtBase * xRes / baseRes
+	pixels := alignUp(width, pixelAlign)
 	return window{
 		xRes:         xRes,
 		yRes:         res,
+		width:        width,
 		pixels:       pixels,
 		lines:        maxLenAtBase * res / baseRes,
 		bytesPerLine: pixels * bytesPerPixel,

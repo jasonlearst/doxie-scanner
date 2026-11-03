@@ -7,6 +7,8 @@ import (
 	"github.com/andiapps-dev/doxie-scanner/internal/scsiusb"
 )
 
+const defaultResolution = 300
+
 func init() {
 	driver.Register("doxie-dx400", New)
 }
@@ -26,13 +28,7 @@ func (d *dxDriver) Info() driver.Info {
 	}
 }
 
-// openDeviceFunc is a package-level indirection so tests can substitute a
-// fake scsiusb.BulkDevice without touching real hardware; production
-// code never reassigns it. This keeps the *only* line that actually
-// calls scsiusb.Open (and therefore real gousb/libusb) tiny and
-// isolated, while everything that builds on top of a BulkDevice —
-// which is effectively all of this driver's real logic — stays fully
-// testable.
+// openDeviceFunc is swapped out by tests for a fake device.
 var openDeviceFunc = func() (scsiusb.BulkDevice, error) {
 	return scsiusb.Open(VID, PID, usbInterfaceNum, epBulkIn&0x0f, epBulkOut&0x0f)
 }
@@ -53,8 +49,6 @@ func (d *dxDriver) Open(ctx context.Context) (driver.Session, error) {
 	return &session{dev: dev}, nil
 }
 
-// session implements driver.Session against any scsiusb.BulkDevice —
-// real hardware in production, a fake in tests.
 type session struct {
 	dev scsiusb.BulkDevice
 }
@@ -64,37 +58,36 @@ func (s *session) HasNextPage(ctx context.Context) (bool, error) {
 }
 
 func (s *session) ScanPage(ctx context.Context, opts driver.ScanOptions) (driver.Page, error) {
-	chunks, err := scanOnePage(s.dev, opts.Duplex)
+	res := opts.Resolution
+	if res == 0 {
+		res = defaultResolution
+	}
+	w, err := newWindow(res, opts.Duplex)
+	if err != nil {
+		return driver.Page{}, err
+	}
+	sides, err := scanSheet(s.dev, w, quantTables[res])
 	if err != nil {
 		return driver.Page{}, err
 	}
 
+	front, err := decodeSide(sides[0], w)
+	if err != nil {
+		return driver.Page{}, err
+	}
 	if !opts.Duplex {
-		return driver.Page{Front: rawToImage(joinChunks(chunks))}, nil
+		return driver.Page{Front: front}, nil
 	}
-
-	front, rear := splitDuplexChunks(chunks)
-	page := driver.Page{Front: rawToImage(front)}
-	if isBlank(rear) {
-		page.BackBlank = true
-	} else {
-		page.Back = rawToImage(rear)
+	back, err := decodeSide(sides[1], w)
+	if err != nil {
+		return driver.Page{}, err
 	}
-	return page, nil
+	if isBlank(back) {
+		return driver.Page{Front: front, BackBlank: true}, nil
+	}
+	return driver.Page{Front: front, Back: back}, nil
 }
 
 func (s *session) Close() error {
 	return s.dev.Close()
-}
-
-func joinChunks(chunks [][]byte) []byte {
-	total := 0
-	for _, c := range chunks {
-		total += len(c)
-	}
-	out := make([]byte, 0, total)
-	for _, c := range chunks {
-		out = append(out, c...)
-	}
-	return out
 }
