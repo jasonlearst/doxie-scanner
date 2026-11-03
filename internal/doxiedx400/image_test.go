@@ -1,107 +1,75 @@
 package doxiedx400
 
 import (
-	"bytes"
+	"image"
+	"image/color"
+	"image/draw"
 	"testing"
 )
 
-func TestRawToImage_DimensionsAndPixels(t *testing.T) {
-	// Two scanlines, each a solid distinguishable color.
-	line0 := bytes.Repeat([]byte{0x10, 0x20, 0x30}, imageWidthPx)
-	line1 := bytes.Repeat([]byte{0x40, 0x50, 0x60}, imageWidthPx)
-	raw := append(append([]byte{}, line0...), line1...)
-
-	img := rawToImage(raw)
-
-	if img.Bounds().Dx() != imageWidthPx || img.Bounds().Dy() != 2 {
-		t.Fatalf("got %dx%d, want %dx2", img.Bounds().Dx(), img.Bounds().Dy(), imageWidthPx)
+func TestIsBlank(t *testing.T) {
+	white := image.NewNRGBA(image.Rect(0, 0, 400, 400))
+	draw.Draw(white, white.Bounds(), image.White, image.Point{}, draw.Src)
+	if !isBlank(white) {
+		t.Error("an all-white page should be blank")
 	}
 
-	r, g, b, a := img.At(0, 0).RGBA()
-	if r>>8 != 0x10 || g>>8 != 0x20 || b>>8 != 0x30 || a>>8 != 0xff {
-		t.Errorf("pixel (0,0): got r=%d g=%d b=%d a=%d", r>>8, g>>8, b>>8, a>>8)
+	inked := image.NewNRGBA(white.Bounds())
+	draw.Draw(inked, inked.Bounds(), image.White, image.Point{}, draw.Src)
+	draw.Draw(inked, image.Rect(0, 0, 400, 40), image.Black, image.Point{}, draw.Src)
+	if isBlank(inked) {
+		t.Error("a page with a 10% ink band should not be blank")
 	}
-	r, g, b, a = img.At(0, 1).RGBA()
-	if r>>8 != 0x40 || g>>8 != 0x50 || b>>8 != 0x60 || a>>8 != 0xff {
-		t.Errorf("pixel (0,1): got r=%d g=%d b=%d a=%d", r>>8, g>>8, b>>8, a>>8)
+
+	faint := image.NewNRGBA(white.Bounds())
+	draw.Draw(faint, faint.Bounds(), &image.Uniform{color.Gray{Y: 210}}, image.Point{}, draw.Src)
+	if !isBlank(faint) {
+		t.Error("uniform show-through (gray 210) should still count as blank")
+	}
+
+	if !isBlank(image.NewNRGBA(image.Rectangle{})) {
+		t.Error("an empty image should be blank")
 	}
 }
 
-func TestRawToImage_TruncatesPartialTrailingLine(t *testing.T) {
-	line0 := bytes.Repeat([]byte{0xAA, 0xBB, 0xCC}, imageWidthPx)
-	partial := make([]byte, lineWidthBytes/2) // half a scanline: should be dropped entirely
-	raw := append(append([]byte{}, line0...), partial...)
+func TestDecodeSide_SquaresUp200dpi(t *testing.T) {
+	jpg := wrapJPEG(2550, 32, quantTables[300], fixture(t, "ink-300.scan"))
 
-	img := rawToImage(raw)
-	if img.Bounds().Dy() != 1 {
-		t.Errorf("expected the partial trailing line to be discarded, got height %d", img.Bounds().Dy())
+	w300, _ := newWindow(300, true)
+	img, err := decodeSide(jpg, w300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := img.Bounds().Size(); got != (image.Point{2550, 32}) {
+		t.Errorf("300 dpi: got %v", got)
+	}
+
+	w200, _ := newWindow(200, true)
+	img, err = decodeSide(jpg, w200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := img.Bounds().Size(); got != (image.Point{1700, 32}) {
+		t.Errorf("200 dpi should be resampled from 300 across: got %v", got)
 	}
 }
 
-func TestRawToImage_EmptyInput(t *testing.T) {
-	img := rawToImage(nil)
-	if img.Bounds().Dy() != 0 {
-		t.Errorf("expected 0 lines for empty input, got %d", img.Bounds().Dy())
+func TestDecodeSide_RejectsGarbage(t *testing.T) {
+	w, _ := newWindow(300, false)
+	if _, err := decodeSide([]byte("not a jpeg"), w); err == nil {
+		t.Fatal("expected a decode error")
 	}
 }
 
-func TestSplitDuplexChunks(t *testing.T) {
-	chunks := [][]byte{
-		{0x01}, // front
-		{0x02}, // rear
-		{0x03}, // front
-		{0x04}, // rear
-		{0x05}, // front (odd count: no matching rear)
-	}
-	front, rear := splitDuplexChunks(chunks)
-	if !bytes.Equal(front, []byte{0x01, 0x03, 0x05}) {
-		t.Errorf("front: got % x", front)
-	}
-	if !bytes.Equal(rear, []byte{0x02, 0x04}) {
-		t.Errorf("rear: got % x", rear)
-	}
-}
-
-func TestSplitDuplexChunks_Empty(t *testing.T) {
-	front, rear := splitDuplexChunks(nil)
-	if len(front) != 0 || len(rear) != 0 {
-		t.Errorf("expected empty front/rear, got %v %v", front, rear)
-	}
-}
-
-func TestIsBlank_EmptyDataIsBlank(t *testing.T) {
-	if !isBlank(nil) {
-		t.Error("expected empty data to be classified as blank")
-	}
-}
-
-func TestIsBlank_SolidWhiteIsBlank(t *testing.T) {
-	raw := bytes.Repeat([]byte{250, 248, 252}, imageWidthPx*100)
-	if !isBlank(raw) {
-		t.Error("expected solid near-white page to be classified as blank")
-	}
-}
-
-func TestIsBlank_SolidBlackIsNotBlank(t *testing.T) {
-	raw := bytes.Repeat([]byte{0, 0, 0}, imageWidthPx*100)
-	if isBlank(raw) {
-		t.Error("expected solid black page to be classified as not blank")
-	}
-}
-
-func TestIsBlank_RealisticMixIsNotBlank(t *testing.T) {
-	// ~10% of pixels dark, comfortably above the 2% threshold.
-	nLines := 100
-	raw := make([]byte, nLines*lineWidthBytes)
-	for i := range raw {
-		raw[i] = 250
-	}
-	darkPixels := (nLines * imageWidthPx) / 10
-	for p := 0; p < darkPixels; p++ {
-		o := p * channels
-		raw[o], raw[o+1], raw[o+2] = 10, 10, 10
-	}
-	if isBlank(raw) {
-		t.Error("expected ~10% dark coverage to be classified as not blank")
+func TestBlankFixturesClassifyCorrectly(t *testing.T) {
+	w, _ := newWindow(300, false)
+	for name, wantBlank := range map[string]bool{"blank-300.scan": true, "ink-300.scan": false} {
+		img, err := decodeSide(wrapJPEG(2550, 32, quantTables[300], fixture(t, name)), w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isBlank(img); got != wantBlank {
+			t.Errorf("%s: isBlank=%v, want %v", name, got, wantBlank)
+		}
 	}
 }
