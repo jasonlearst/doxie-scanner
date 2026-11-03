@@ -14,6 +14,8 @@ colors:
   cell-pressed-dark: "#3a3a3c"
   fill: "rgba(118, 118, 128, 0.12)"
   fill-dark: "rgba(118, 118, 128, 0.24)"
+  thumb: "#ffffff"
+  thumb-dark: "#636366"
   label: "#000000"
   label-dark: "#ffffff"
   label-secondary: "#6c6c70"
@@ -152,7 +154,7 @@ components:
     rounded: "{rounded.field}"
     padding: "2px"
   segmented-control-selected:
-    backgroundColor: "{colors.cell}"
+    backgroundColor: "{colors.thumb}"
     textColor: "{colors.label}"
     rounded: "{rounded.control-inner}"
     height: "36px"
@@ -226,6 +228,7 @@ A grayscale grouped-list world with one accessible blue and three status colors,
 - **Cell White / Cell Graphite** (cell / cell-dark): list groups, notices, the laptop sidebar, the viewer toolbar, nav-arrow and badge chips.
 - **Pressed Gray** (cell-pressed): active state of tappable cells.
 - **Quiet Fill** (fill): translucent gray behind tinted buttons, text fields, segmented tracks, chips, and placeholder thumbnails; also the selected row in the laptop master list and sidebar.
+- **Segment Thumb** (thumb / thumb-dark): the selected segment. White in light; #636366 in dark, so the thumb sits lighter than its track instead of reading as a hole.
 - **Label / Secondary Label** (label, label-secondary): primary text; subtitles, section headers, footers, inactive tab items, chevrons. Secondary is #6c6c70 rather than iOS's #8a8a8e because the stock gray fails 4.5:1 as text.
 - **Hairline** (separator): 0.5px cell separators inset 16px from the leading edge (72px when the row has a thumbnail), tab bar and toolbar top rules, sidebar and master-list edge.
 
@@ -264,8 +267,8 @@ A grayscale grouped-list world with one accessible blue and three status colors,
 Single column, phone-first. Content gutters are 16px (respecting safe-area insets); pages cap at 680px, the scan detail at 1200px. Vertical rhythm runs on 4px steps: 8 inside stacks, 12 between related blocks, 16 under titles, 28–32 between groups. Large titles sit 52px from the top.
 
 - **Under 900px:** fixed translucent tab bar at the bottom (56px plus safe area). Sticky translucent nav bar with back button and trailing actions. The scan's action bar (Split, PDF, Send) sticks above the tab bar on a fade-to-ground gradient; Send gets the widest share (flex 1.6).
-- **900–1099px:** the tab bar becomes a 232px sidebar on the cell color with a hairline right edge; items are 40px rows with tinted icons and a fill highlight when current. Pages stay single-column. Sheets become centered dialogs (max 560px). Viewer gains side arrows.
-- **1100px and up:** the Scans area becomes master–detail, a sticky 340px scrolling list beside the detail (40px gutters). The selected row gets the fill and a semibold title; with nothing selected, the detail shows a centered empty state.
+- **900–1099px:** the tab bar stays along the bottom, as on an iPad: items center in a row with the icon beside a 13px label. The Scans area becomes master–detail, a sticky 320px scrolling list beside the detail (32px gutters), so the list never disappears on a laptop window. The selected row gets the fill and a semibold title; with nothing selected, the detail shows a centered empty state. Sheets become centered dialogs (max 560px). Viewer gains side arrows.
+- **1100px and up:** the tab bar becomes a 232px sidebar on the cell color with a hairline right edge; items are 40px rows with tinted icons and a fill highlight when current. The master list widens to 340px with 40px gutters.
 - **Page grid:** auto-fill thumbnails at 100px minimum (16 × 12px gaps) on phone, 150px minimum (24 × 20px) from 900px. Thumbnails keep a letter-page 8.5:11 slot.
 
 **The 44 Rule.** Every tappable thing is at least 44px tall: buttons, back, cells (48px), fields, split dividers, nav arrows. Segmented segments and chips are 36px inside a larger hit row.
@@ -276,7 +279,8 @@ Flat by default, depth by tone: grouped gray ground, lighter cells on top, darke
 
 ### Shadow Vocabulary
 - **Paper** (`0 1px 3px rgba(0,0,0,0.18)`; dark `0 1px 3px rgba(0,0,0,0.6)`): every page image and list thumbnail, so scanned sheets read as paper on the ground.
-- **Raised** (`0 3px 8px rgba(0,0,0,0.12), 0 1px 1px rgba(0,0,0,0.04)`; dark 0.5 / 0.3): the selected segment, viewer nav arrows, the viewer's hidden-page badge.
+- **Raised** (`0 3px 8px rgba(0,0,0,0.12), 0 1px 1px rgba(0,0,0,0.04)`; dark 0.5 / 0.3): viewer nav arrows, the viewer's hidden-page badge.
+- **Thumb** (`0 0 0 0.5px rgba(0,0,0,0.06), 0 1px 1px rgba(0,0,0,0.08)`; dark 0.2 / 0.25): the selected segment. A hairline ring plus a tight drop, because a deep drop fills the 2px inset below the thumb and makes it look pushed up.
 - **Scrim** (`rgba(0,0,0,0.32)`; dark 0.55): behind sheets and dialogs.
 
 ### Named Rules
@@ -314,12 +318,13 @@ The first thing on the Scan page: a 12px dot (or spinner while checking/scanning
 ### Inputs / Fields
 - **Style:** borderless, quiet fill, 10px radius, 44px tall, 17px text; selects carry a drawn chevron. Ranges use the tint fill as accent.
 - **Focus:** the shared 3px tint ring; caret in tint.
-- **Segmented control:** fill track, 2px inset, white raised thumb with semibold label on the selected option. Backed by a radio group.
+- **Segmented control:** fill track, 2px inset, thumb (white; #636366 in dark, lighter than the track as on iOS) with the thumb shadow and a semibold label on the selected option. Backed by a radio group.
 - **Chips:** pill toggles for Paperless tags; selected chips take the tint fill and white semibold label.
 
 ### Navigation
 - **Tab bar (under 900px):** three items, Scan · Scans · Settings, 25px icon over an 11px label; secondary label color, tint when current. Translucent material, hairline top edge.
-- **Sidebar (900px and up):** the same three as 40px rows with 22px tinted icons and 15px labels; current row gets the fill and semibold label.
+- **Tab bar (900–1099px):** the same three items centered in a row, 22px icon beside a 13px label.
+- **Sidebar (1100px and up):** the same three as 40px rows with 22px tinted icons and 15px labels; current row gets the fill and semibold label.
 - **Nav bar:** sticky, translucent; back button with a 26px chevron and the word "Back" in tint; centered title fades in after the large title scrolls away; trailing more/actions.
 - **Sheets:** rise from the bottom with a 36 × 5px grabber, a three-column head (Cancel · title · action), optional centered 15px lede. From 900px they become centered dialogs that pop in at 0.98 scale.
 
@@ -330,7 +335,9 @@ Documents are labeled groups ("Document 1", count and PDF link trailing) of pape
 The grid becomes full-width rows (48 × 62px page, "Page N", "Document N"). Between each pair sits a full-width 44px divider on the grouped ground with dashed hairlines either side of "Tap to split here"; an active split is a tint-filled bar with a scissors glyph and "Document N starts here" in white semibold.
 
 ### Page Viewer
-Full-screen over the grouped ground: top row (plain semibold Done · "Page N of M", or "Hidden page" when paging the hidden set), the page centered with the paper shadow, side arrows from 900px, and a bottom toolbar on the cell color of icon-over-label tint actions (Rotate, Crop, Adjust, Hide/Show, More); a destructive toolbar action takes red. It pages only through the set it was opened in, and after Hide/Show moves to a neighbor.
+Full-screen over the grouped ground: top row (plain semibold Done · "Page N of M", or "Hidden page" when paging the hidden set), the page centered with the paper shadow, side arrows from 900px, and a bottom toolbar on the cell color of icon-over-label tint actions (Rotate, Crop, Adjust, Hide/Show, More); a destructive toolbar action takes red. It pages only through the set it was opened in, and after Hide/Show moves to a neighbor. Paging swaps the page in place; only opening the viewer fades it in.
+
+**Adjust** happens inside the viewer, never in a sheet, so the page stays in sight. The top row becomes Reset · "Adjust" · Done and the toolbar becomes a panel on the cell color: Color · Gray · B&W, then Brightness and Contrast sliders with signed values, then a centered footnote that the original is never touched. Phones and tall windows put the panel under the page; landscape windows from 900px dock it as a 340px column on the right, like Photos. Sliders preview instantly on the untoned page through an SVG filter that repeats the server's math, and save on release.
 
 ### Toast
 Inverted pill (label color background, ground color text), 15px semibold, rises 20px into place above the tab bar. Short past-tense confirmations: "Saved", "Page hidden", "Sent to Paperless".

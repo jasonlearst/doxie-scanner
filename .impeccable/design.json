@@ -184,6 +184,16 @@
           "#eeeef0"
         ]
       },
+      "thumb": {
+        "role": "neutral",
+        "displayName": "Segment Thumb",
+        "canonical": "#ffffff"
+      },
+      "thumb-dark": {
+        "role": "neutral",
+        "displayName": "Segment Thumb (dark)",
+        "canonical": "#636366"
+      },
       "label": {
         "role": "neutral",
         "displayName": "Label",
@@ -457,7 +467,12 @@
       {
         "name": "raised",
         "value": "0 3px 8px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.04)",
-        "purpose": "Selected segment, viewer nav arrows and badge; dark: 0.5 / 0.3 alpha."
+        "purpose": "Viewer nav arrows and the hidden-page badge; dark: 0.5 / 0.3 alpha."
+      },
+      {
+        "name": "thumb",
+        "value": "0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 1px rgba(0, 0, 0, 0.08)",
+        "purpose": "The selected segment: a hairline ring plus a tight drop, so the 2px inset looks even; dark: 0.2 / 0.25 alpha."
       },
       {
         "name": "scrim",
@@ -523,11 +538,11 @@
         "value": "<900px"
       },
       {
-        "name": "sidebar",
+        "name": "master-detail",
         "value": "900px"
       },
       {
-        "name": "master-detail",
+        "name": "sidebar",
         "value": "1100px"
       }
     ]
@@ -585,9 +600,9 @@
       "name": "Segmented Control",
       "kind": "input",
       "refersTo": "segmented-control",
-      "description": "Radio group on a fill track; selected segment is a raised cell.",
+      "description": "Radio group on a fill track; the selected segment is a lighter thumb with a hairline ring and a tight 1px shadow, so the 2px inset reads even on all sides.",
       "html": "<div class=\"ds-seg\"><input type=\"radio\" name=\"dpi\" id=\"d1\"><label for=\"d1\">200 dpi</label><input type=\"radio\" name=\"dpi\" id=\"d2\" checked><label for=\"d2\">300 dpi</label><input type=\"radio\" name=\"dpi\" id=\"d3\"><label for=\"d3\">600 dpi</label></div>",
-      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;padding:2px;border-radius:10px;background:var(--fill);font-family:var(--font);color:var(--label)} .ds-seg input{position:absolute;opacity:0} .ds-seg label{display:flex;align-items:center;justify-content:center;min-height:36px;border-radius:8px;font-size:15px;font-weight:500;cursor:pointer;transition:background .2s var(--ease)} .ds-seg input:checked+label{background:var(--cell);box-shadow:var(--shadow-raised);font-weight:600} .ds-seg input:focus-visible+label{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent)}"
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--thumb:#fff;--shadow-thumb:0 0 0 .5px rgba(0,0,0,.06),0 1px 1px rgba(0,0,0,.08);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a;--thumb:#636366;--shadow-thumb:0 0 0 .5px rgba(0,0,0,.2),0 1px 1px rgba(0,0,0,.25)}} .ds-seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;padding:2px;border-radius:10px;background:var(--fill);font-family:var(--font);color:var(--label)} .ds-seg input{position:absolute;opacity:0} .ds-seg label{display:flex;align-items:center;justify-content:center;min-height:36px;border-radius:8px;font-size:15px;font-weight:500;cursor:pointer;transition:background .2s var(--ease)} .ds-seg input:checked+label{background:var(--thumb);box-shadow:var(--shadow-thumb);font-weight:600} .ds-seg input:focus-visible+label{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent)}"
     },
     {
       "name": "Tag Chips",
