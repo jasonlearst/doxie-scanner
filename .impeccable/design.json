@@ -1,0 +1,677 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-03T12:00:00Z",
+  "title": "Design System: Scanner",
+  "extensions": {
+    "colorMeta": {
+      "tint": {
+        "role": "primary",
+        "displayName": "Accessible System Blue",
+        "canonical": "#0066d6",
+        "tonalRamp": [
+          "#00062e",
+          "#00215e",
+          "#004092",
+          "#0661ca",
+          "#3e88ed",
+          "#74afff",
+          "#a3d4ff",
+          "#caf1ff"
+        ]
+      },
+      "tint-dark": {
+        "role": "primary",
+        "displayName": "Night Blue Label",
+        "canonical": "#4da3ff",
+        "tonalRamp": [
+          "#00062e",
+          "#00215e",
+          "#004092",
+          "#0661ca",
+          "#3e88ed",
+          "#74afff",
+          "#a3d4ff",
+          "#caf1ff"
+        ]
+      },
+      "tint-fill-dark": {
+        "role": "primary",
+        "displayName": "Night Blue Fill",
+        "canonical": "#0a6fdb",
+        "tonalRamp": [
+          "#00062e",
+          "#00215e",
+          "#004092",
+          "#0661ca",
+          "#3e88ed",
+          "#74afff",
+          "#a3d4ff",
+          "#caf1ff"
+        ]
+      },
+      "on-tint": {
+        "role": "neutral",
+        "displayName": "On Tint",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "grouped-bg": {
+        "role": "neutral",
+        "displayName": "Grouped Gray",
+        "canonical": "#f2f2f7",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "grouped-bg-dark": {
+        "role": "neutral",
+        "displayName": "Grouped Black",
+        "canonical": "#000000",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "cell": {
+        "role": "neutral",
+        "displayName": "Cell White",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "cell-dark": {
+        "role": "neutral",
+        "displayName": "Cell Graphite",
+        "canonical": "#1c1c1e",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "cell-pressed": {
+        "role": "neutral",
+        "displayName": "Pressed Gray",
+        "canonical": "#d1d1d6",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "cell-pressed-dark": {
+        "role": "neutral",
+        "displayName": "Pressed Graphite",
+        "canonical": "#3a3a3c",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "fill": {
+        "role": "neutral",
+        "displayName": "Quiet Fill",
+        "canonical": "rgba(118, 118, 128, 0.12)",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "fill-dark": {
+        "role": "neutral",
+        "displayName": "Quiet Fill (dark)",
+        "canonical": "rgba(118, 118, 128, 0.24)",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "label": {
+        "role": "neutral",
+        "displayName": "Label",
+        "canonical": "#000000",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "label-dark": {
+        "role": "neutral",
+        "displayName": "Label (dark)",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "label-secondary": {
+        "role": "neutral",
+        "displayName": "Secondary Label",
+        "canonical": "#6c6c70",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "label-secondary-dark": {
+        "role": "neutral",
+        "displayName": "Secondary Label (dark)",
+        "canonical": "#aeaeb2",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "separator": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#c6c6c8",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "separator-dark": {
+        "role": "neutral",
+        "displayName": "Hairline (dark)",
+        "canonical": "#38383a",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#262628",
+          "#454548",
+          "#666669",
+          "#89898c",
+          "#adadb1",
+          "#d1d1d3",
+          "#eeeef0"
+        ]
+      },
+      "green-text": {
+        "role": "tertiary",
+        "displayName": "Ready Green (text)",
+        "canonical": "#1f7a37",
+        "tonalRamp": [
+          "#001100",
+          "#00300c",
+          "#0f5322",
+          "#26793a",
+          "#529c5f",
+          "#83bf8c",
+          "#b0dfb5",
+          "#d4fad8"
+        ]
+      },
+      "green-dot": {
+        "role": "tertiary",
+        "displayName": "Ready Green (dot)",
+        "canonical": "#34c759",
+        "tonalRamp": [
+          "#001100",
+          "#00300c",
+          "#0f5322",
+          "#26793a",
+          "#529c5f",
+          "#83bf8c",
+          "#b0dfb5",
+          "#d4fad8"
+        ]
+      },
+      "green-dark": {
+        "role": "tertiary",
+        "displayName": "Ready Green (dark)",
+        "canonical": "#30d158",
+        "tonalRamp": [
+          "#001100",
+          "#00300c",
+          "#0f5322",
+          "#26793a",
+          "#529c5f",
+          "#83bf8c",
+          "#b0dfb5",
+          "#d4fad8"
+        ]
+      },
+      "orange-text": {
+        "role": "tertiary",
+        "displayName": "Attention Orange (text)",
+        "canonical": "#b34700",
+        "tonalRamp": [
+          "#200000",
+          "#4a0f00",
+          "#772800",
+          "#a74202",
+          "#cc6a3c",
+          "#ea9672",
+          "#ffbfa1",
+          "#ffe0c8"
+        ]
+      },
+      "orange-dot": {
+        "role": "tertiary",
+        "displayName": "Attention Orange (dot)",
+        "canonical": "#ff9500",
+        "tonalRamp": [
+          "#200000",
+          "#4a0f00",
+          "#772800",
+          "#a74202",
+          "#cc6a3c",
+          "#ea9672",
+          "#ffbfa1",
+          "#ffe0c8"
+        ]
+      },
+      "orange-dark": {
+        "role": "tertiary",
+        "displayName": "Attention Orange (dark)",
+        "canonical": "#ff9f0a",
+        "tonalRamp": [
+          "#200000",
+          "#4a0f00",
+          "#772800",
+          "#a74202",
+          "#cc6a3c",
+          "#ea9672",
+          "#ffbfa1",
+          "#ffe0c8"
+        ]
+      },
+      "red-text": {
+        "role": "tertiary",
+        "displayName": "Error Red (text)",
+        "canonical": "#c4001a",
+        "tonalRamp": [
+          "#270000",
+          "#550000",
+          "#88000a",
+          "#be131f",
+          "#e44e49",
+          "#ff847a",
+          "#ffb1a7",
+          "#ffd6cd"
+        ]
+      },
+      "red-dot": {
+        "role": "tertiary",
+        "displayName": "Error Red (dot)",
+        "canonical": "#ff3b30",
+        "tonalRamp": [
+          "#270000",
+          "#550000",
+          "#88000a",
+          "#be131f",
+          "#e44e49",
+          "#ff847a",
+          "#ffb1a7",
+          "#ffd6cd"
+        ]
+      },
+      "red-dark": {
+        "role": "tertiary",
+        "displayName": "Error Red (dark)",
+        "canonical": "#ff453a",
+        "tonalRamp": [
+          "#270000",
+          "#550000",
+          "#88000a",
+          "#be131f",
+          "#e44e49",
+          "#ff847a",
+          "#ffb1a7",
+          "#ffd6cd"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "large-title": {
+        "displayName": "Large Title",
+        "purpose": "One per top-level page; collapses into the nav-bar title on scroll."
+      },
+      "title-2": {
+        "displayName": "Title 2",
+        "purpose": "Scan name at the top of a scan's detail."
+      },
+      "status-title": {
+        "displayName": "Status Title",
+        "purpose": "The scanner status cell only."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Button labels, sheet and nav titles, document headers, viewer page count."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Cell titles, values, field input."
+      },
+      "subhead": {
+        "displayName": "Subhead",
+        "purpose": "Cell subtitles, notices, field labels, hints, chips, segmented labels."
+      },
+      "footnote": {
+        "displayName": "Footnote",
+        "purpose": "Group footers, field hints, page captions."
+      },
+      "section-header": {
+        "displayName": "Section Header",
+        "purpose": "Uppercase iOS inset-grouped section header naming the list below it."
+      },
+      "tab-label": {
+        "displayName": "Tab Label",
+        "purpose": "Tab bar and viewer toolbar captions."
+      }
+    },
+    "shadows": [
+      {
+        "name": "paper",
+        "value": "0 1px 3px rgba(0, 0, 0, 0.18)",
+        "purpose": "Page images and thumbnails; dark: 0 1px 3px rgba(0, 0, 0, 0.6)."
+      },
+      {
+        "name": "raised",
+        "value": "0 3px 8px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.04)",
+        "purpose": "Selected segment, viewer nav arrows and badge; dark: 0.5 / 0.3 alpha."
+      },
+      {
+        "name": "scrim",
+        "value": "rgba(0, 0, 0, 0.32)",
+        "purpose": "Behind sheets and dialogs; dark 0.55."
+      },
+      {
+        "name": "material",
+        "value": "color-mix(in srgb, surface 92%, transparent) + backdrop-filter: saturate(180%) blur(20px)",
+        "purpose": "Tab bar and sticky nav bar."
+      },
+      {
+        "name": "focus-ring",
+        "value": "outline: 3px solid color-mix(in srgb, var(--tint) 55%, transparent); outline-offset: 2px",
+        "purpose": "Every focusable control."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "House ease for presses, arrivals, sheets, toasts."
+      },
+      {
+        "name": "press",
+        "value": "transform scale(0.98) 0.15s",
+        "purpose": "Button press."
+      },
+      {
+        "name": "arrive",
+        "value": "0.6s; from opacity 0, translateY(10px) scale(0.96)",
+        "purpose": "New page tiles as each sheet is scanned."
+      },
+      {
+        "name": "feed",
+        "value": "1.8s infinite; 35% light band translating down the placeholder sheet",
+        "purpose": "Live-scan placeholder; removed under reduced motion."
+      },
+      {
+        "name": "sheet-rise",
+        "value": "0.45s rise from translateY(100%); close 0.25s ease-in",
+        "purpose": "Phone sheets."
+      },
+      {
+        "name": "dialog-pop",
+        "value": "0.35s from opacity 0, scale(0.98)",
+        "purpose": "Sheets as centered dialogs from 900px."
+      },
+      {
+        "name": "fade",
+        "value": "0.25s",
+        "purpose": "Scrim and viewer entry."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "animation and transition durations 0.01ms",
+        "purpose": "prefers-reduced-motion: reduce."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "phone",
+        "value": "<900px"
+      },
+      {
+        "name": "sidebar",
+        "value": "900px"
+      },
+      {
+        "name": "master-detail",
+        "value": "1100px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary-big",
+      "description": "The one filled action per screen (Scan, Send, Scan again).",
+      "html": "<button class=\"ds-btn ds-btn-primary ds-btn-big\" type=\"button\"><svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 9h8M8 12h8M8 15h5\"/></svg>Scan</button>",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:0 16px;border:0;border-radius:12px;background:var(--fill);color:var(--tint);font:600 17px/1.3 var(--font);letter-spacing:-0.01em;cursor:pointer;transition:transform .15s var(--ease)} .ds-btn:active{transform:scale(.98)} .ds-btn:focus-visible{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent);outline-offset:2px} .ds-btn[disabled]{background:var(--fill);color:color-mix(in srgb,var(--label-2) 60%,transparent);cursor:default;transform:none} .ds-btn-primary{background:var(--tint-fill);color:var(--on-tint)} .ds-btn-big{width:100%;min-height:54px;font-size:20px;border-radius:14px}"
+    },
+    {
+      "name": "Tinted Button",
+      "kind": "button",
+      "refersTo": "button-tinted",
+      "description": "Secondary action on the quiet fill (Split, PDF, Cancel), plus disabled state.",
+      "html": "<div style=\"display:flex;gap:10px\"><button class=\"ds-btn\" type=\"button\">Split</button><button class=\"ds-btn\" type=\"button\" disabled>PDF</button></div>",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:0 16px;border:0;border-radius:12px;background:var(--fill);color:var(--tint);font:600 17px/1.3 var(--font);letter-spacing:-0.01em;cursor:pointer;transition:transform .15s var(--ease)} .ds-btn:active{transform:scale(.98)} .ds-btn:focus-visible{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent);outline-offset:2px} .ds-btn[disabled]{background:var(--fill);color:color-mix(in srgb,var(--label-2) 60%,transparent);cursor:default;transform:none} "
+    },
+    {
+      "name": "Plain and Destructive Button",
+      "kind": "button",
+      "refersTo": "button-plain",
+      "description": "Unfilled tint text for sheet actions; red for destructive.",
+      "html": "<div style=\"display:flex;gap:8px\"><button class=\"ds-btn ds-btn-plain\" type=\"button\">Done</button><button class=\"ds-btn ds-btn-plain ds-destructive\" type=\"button\">Delete this scan</button></div>",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:0 16px;border:0;border-radius:12px;background:var(--fill);color:var(--tint);font:600 17px/1.3 var(--font);letter-spacing:-0.01em;cursor:pointer;transition:transform .15s var(--ease)} .ds-btn:active{transform:scale(.98)} .ds-btn:focus-visible{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent);outline-offset:2px} .ds-btn[disabled]{background:var(--fill);color:color-mix(in srgb,var(--label-2) 60%,transparent);cursor:default;transform:none} .ds-btn-plain{background:none;padding:0 8px} .ds-destructive{color:var(--red)}"
+    },
+    {
+      "name": "Status Cell",
+      "kind": "custom",
+      "refersTo": "list-group",
+      "description": "Scanner status: dot on the title's first line, plain sentence beneath.",
+      "html": "<div class=\"ds-list\"><div class=\"ds-status\"><span class=\"ds-dot ds-green\"></span><div><div class=\"ds-st-title\">Ready</div><div class=\"ds-sub\">Paper is loaded.</div></div></div><div class=\"ds-status\"><span class=\"ds-dot ds-orange\"></span><div><div class=\"ds-st-title\">Off</div><div class=\"ds-sub\">Press the power button on the scanner to turn it on.</div></div></div></div>",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-list{background:var(--cell);border-radius:12px;overflow:hidden;font-family:var(--font);color:var(--label)} .ds-status{position:relative;display:flex;gap:12px;padding:14px 16px} .ds-status+.ds-status::before{content:'';position:absolute;top:0;left:16px;right:0;border-top:.5px solid var(--separator)} .ds-dot{width:12px;height:12px;border-radius:50%;flex:none;margin-top:6.5px} .ds-green{background:var(--green-dot)} .ds-orange{background:var(--orange-dot)} .ds-st-title{font-size:20px;line-height:25px;font-weight:600} .ds-sub{font-size:15px;line-height:20px;color:var(--label-2);margin-top:1px}"
+    },
+    {
+      "name": "Scan Row",
+      "kind": "card",
+      "refersTo": "list-cell",
+      "description": "Inset grouped list row: paper thumbnail, title, time and pages, status line in its tone, chevron.",
+      "html": "<div class=\"ds-list\"><a class=\"ds-cell\" href=\"#\"><span class=\"ds-thumb\"></span><div class=\"ds-main\"><div class=\"ds-title\">School form</div><div class=\"ds-sub\">1:24 AM · 2 pages</div><div class=\"ds-sub ds-red\">Couldn’t send</div></div><span class=\"ds-chev\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m9 18 6-6-6-6\"/></svg></span></a><a class=\"ds-cell\" href=\"#\"><span class=\"ds-thumb\"></span><div class=\"ds-main\"><div class=\"ds-title\">Water bill</div><div class=\"ds-sub\">12:24 AM · 2 pages</div><div class=\"ds-sub ds-green\">Filed in Paperless</div></div><span class=\"ds-chev\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m9 18 6-6-6-6\"/></svg></span></a></div>",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-list{background:var(--cell);border-radius:12px;overflow:hidden;font-family:var(--font)} .ds-cell{position:relative;display:flex;align-items:center;gap:12px;min-height:48px;padding:11px 16px;color:var(--label);text-decoration:none} .ds-cell+.ds-cell::before{content:'';position:absolute;top:0;left:72px;right:0;border-top:.5px solid var(--separator)} .ds-cell:active{background:var(--cell-pressed)} .ds-cell:focus-visible{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent);outline-offset:-3px} .ds-thumb{width:44px;height:56px;border-radius:4px;background:var(--cell);box-shadow:var(--page-shadow);flex:none} .ds-main{flex:1;min-width:0} .ds-title{font-size:17px;line-height:22px} .ds-sub{font-size:15px;line-height:20px;color:var(--label-2);margin-top:1px} .ds-red{color:var(--red)} .ds-green{color:var(--green)} .ds-chev{color:var(--label-2);opacity:.7;display:flex}"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "text-field",
+      "description": "Borderless filled field, 44px, tint focus ring.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"Title\">",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-input{width:100%;min-height:44px;padding:10px 12px;border:0;border-radius:10px;background:var(--fill);color:var(--label);font:17px var(--font);caret-color:var(--tint);appearance:none} .ds-input:focus-visible{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent);outline-offset:2px}"
+    },
+    {
+      "name": "Segmented Control",
+      "kind": "input",
+      "refersTo": "segmented-control",
+      "description": "Radio group on a fill track; selected segment is a raised cell.",
+      "html": "<div class=\"ds-seg\"><input type=\"radio\" name=\"dpi\" id=\"d1\"><label for=\"d1\">200 dpi</label><input type=\"radio\" name=\"dpi\" id=\"d2\" checked><label for=\"d2\">300 dpi</label><input type=\"radio\" name=\"dpi\" id=\"d3\"><label for=\"d3\">600 dpi</label></div>",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;padding:2px;border-radius:10px;background:var(--fill);font-family:var(--font);color:var(--label)} .ds-seg input{position:absolute;opacity:0} .ds-seg label{display:flex;align-items:center;justify-content:center;min-height:36px;border-radius:8px;font-size:15px;font-weight:500;cursor:pointer;transition:background .2s var(--ease)} .ds-seg input:checked+label{background:var(--cell);box-shadow:var(--shadow-raised);font-weight:600} .ds-seg input:focus-visible+label{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent)}"
+    },
+    {
+      "name": "Tag Chips",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "Pill toggles for Paperless tags.",
+      "html": "<div class=\"ds-chips\"><button class=\"ds-chip\" aria-pressed=\"true\">Bills</button><button class=\"ds-chip\" aria-pressed=\"false\">School</button></div>",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-chips{display:flex;gap:8px;flex-wrap:wrap} .ds-chip{min-height:36px;padding:0 14px;border:0;border-radius:18px;background:var(--fill);color:var(--label);font:15px var(--font);cursor:pointer} .ds-chip[aria-pressed=true]{background:var(--tint-fill);color:var(--on-tint);font-weight:600} .ds-chip:focus-visible{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent);outline-offset:2px}"
+    },
+    {
+      "name": "Split Divider",
+      "kind": "custom",
+      "refersTo": "split-divider",
+      "description": "Full-width 44px tappable divider between page rows in split mode.",
+      "html": "<div class=\"ds-split\"><div class=\"ds-row\">Page 1</div><button class=\"ds-div\">Tap to split here</button><div class=\"ds-row\">Page 2</div><button class=\"ds-div ds-on\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"6\" cy=\"6\" r=\"3\"/><circle cx=\"6\" cy=\"18\" r=\"3\"/><path d=\"M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12\"/></svg>Document 2 starts here</button><div class=\"ds-row\">Page 3</div></div>",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-split{border-radius:12px;overflow:hidden;font-family:var(--font)} .ds-row{padding:20px 16px;background:var(--cell);color:var(--label);font-size:17px} .ds-div{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:44px;border:0;background:var(--bg);color:var(--label-2);font:15px var(--font);cursor:pointer} .ds-div:not(.ds-on)::before,.ds-div:not(.ds-on)::after{content:'';flex:1;max-width:60px;border-top:1px dashed var(--separator)} .ds-on{background:var(--tint-fill);color:var(--on-tint);font-weight:600} .ds-div:focus-visible{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent);outline-offset:-3px}"
+    },
+    {
+      "name": "Tab Bar",
+      "kind": "nav",
+      "refersTo": "tab-bar-item",
+      "description": "Phone navigation: three icon-over-label tabs on translucent material.",
+      "html": "<nav class=\"ds-tabbar\"><a href=\"#\" aria-current=\"page\"><svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 9h8M8 12h8M8 15h5\"/></svg><span>Scan</span></a><a href=\"#\"><svg width=\"25\" height=\"25\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5\"/></svg><span>Scans</span></a><a href=\"#\"><svg width=\"25\" height=\"25\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68 1.65 1.65 0 0 0 10 3.17V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z\"/></svg><span>Settings</span></a></nav>",
+      "css": ":host{--bg:#f2f2f7;--cell:#fff;--cell-pressed:#d1d1d6;--fill:rgba(118,118,128,.12);--label:#000;--label-2:#6c6c70;--separator:#c6c6c8;--tint:#0066d6;--tint-fill:#0066d6;--on-tint:#fff;--green:#1f7a37;--green-dot:#34c759;--orange:#b34700;--orange-dot:#ff9500;--red:#c4001a;--red-dot:#ff3b30;--ease:cubic-bezier(0.16,1,0.3,1);--shadow-raised:0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);--page-shadow:0 1px 3px rgba(0,0,0,.18);--font:-apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif}@media (prefers-color-scheme: dark){:host{--bg:#000;--cell:#1c1c1e;--cell-pressed:#3a3a3c;--fill:rgba(118,118,128,.24);--label:#fff;--label-2:#aeaeb2;--separator:#38383a;--tint:#4da3ff;--tint-fill:#0a6fdb;--green:#30d158;--green-dot:#30d158;--orange:#ff9f0a;--orange-dot:#ff9f0a;--red:#ff453a;--red-dot:#ff453a}} .ds-tabbar{display:flex;justify-content:space-around;height:56px;background:color-mix(in srgb,var(--cell) 92%,transparent);backdrop-filter:saturate(180%) blur(20px);border-top:.5px solid var(--separator);font-family:var(--font)} .ds-tabbar a{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--label-2);text-decoration:none;font-size:11px;font-weight:500} .ds-tabbar a svg{width:25px;height:25px} .ds-tabbar a[aria-current=page]{color:var(--tint)} .ds-tabbar a:focus-visible{outline:3px solid color-mix(in srgb,var(--tint) 55%,transparent)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Built-In App",
+    "overview": "This is the category standard, executed as if Apple had shipped it next to Notes, Files and Settings. The household walks up to the scanner with paper in one hand and a phone in the other; every surface is something they already know how to read: a large title, a status cell, one blue button, inset grouped lists on a grouped gray ground, sheets that rise from the bottom, a tab bar. Conventions are used without irony and nothing is smuggled in to make it look designed.\n\nDensity is relaxed on the phone and tightens only where the owner works through a backlog: on a laptop the scan list sits as a 340px master column beside the open scan. Light and dark follow the device; dark is true black ground with raised #1c1c1e cells. Color carries meaning, never decoration: one tint for \"you can act here\", and green, orange, red for what the scanner and Paperless are doing.\n\nThe only expressive moment is the scanner itself: pages arrive into the grid as each sheet comes out, and the placeholder for the next sheet carries a slow light sweep like the scan head passing down it.",
+    "keyCharacteristics": [
+      "Apple system idiom: system font, large titles, inset grouped lists, sheets, segmented controls, tab bar.",
+      "One tint, deepened for contrast; semantic status colors only.",
+      "Every target at least 44px tall.",
+      "Flat cells on a tonal ground; shadows only on paper and on things that float.",
+      "Light and dark follow the device."
+    ],
+    "rules": [
+      {
+        "name": "The One Tint Rule",
+        "body": "Blue means \"tap here\" and nothing else. No second accent, no blue decoration, no blue headings.",
+        "section": "colors"
+      },
+      {
+        "name": "The Status Means Something Rule",
+        "body": "Green, orange and red appear only when they report a real state of the scanner, a scan, or a send. A dot is always paired with words; color never carries the state alone.",
+        "section": "colors"
+      },
+      {
+        "name": "The Deepened Stock Rule",
+        "body": "Where an iOS stock color fails contrast in this context (systemBlue under white text, secondaryLabel as text), use the deepened token here, never the stock value.",
+        "section": "colors"
+      },
+      {
+        "name": "The Apple Sizes Rule",
+        "body": "Text sizes come from the ladder above (34, 28, 20, 17, 15, 13, 11). No in-between sizes, no light weights, no display tracking beyond -0.02em.",
+        "section": "typography"
+      },
+      {
+        "name": "The 44 Rule",
+        "body": "Every tappable thing is at least 44px tall: buttons, back, cells (48px), fields, split dividers, nav arrows. Segmented segments and chips are 36px inside a larger hit row.",
+        "section": "layout"
+      },
+      {
+        "name": "The Paper Casts, Cells Don't Rule",
+        "body": "List groups, buttons, notices and cards never take a shadow. Only scanned paper and small floating controls do.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** use the deepened tint (#0066d6 light, #4da3ff text / #0a6fdb fill dark) anywhere iOS would use systemBlue.",
+      "**Do** keep one primary button per screen; everything else is tinted or plain.",
+      "**Do** put status on its own line in its tone color, and pair every status dot with words.",
+      "**Do** give scanned pages the paper shadow and a 3px radius so they read as paper.",
+      "**Do** keep every target at least 44px tall, including dividers in split mode.",
+      "**Do** honor `prefers-reduced-motion`: transitions collapse and the scan-light sweep is removed.",
+      "**Do** describe the scanner in the household's words: \"Off\" when it is gone from USB, \"Paper is loaded.\" when ready."
+    ],
+    "donts": [
+      "**Don't** use stock #007AFF / #0A84FF or #8a8a8e as text or behind white text; they fail 4.5:1 here.",
+      "**Don't** dim disabled controls with opacity; use the explicit fill and muted label.",
+      "**Don't** put shadows or outlines on list groups, buttons or notices.",
+      "**Don't** introduce a second accent or decorative color; status colors are for status only.",
+      "**Don't** add halos or rings to status dots.",
+      "**Don't** use the vendor's \"Doxie\" name or marks as the app's identity."
+    ]
+  }
+}
