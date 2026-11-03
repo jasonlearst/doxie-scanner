@@ -54,6 +54,10 @@ func (s *Server) handlePageImage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("crop") == "none" {
 		page.Edits.Crop = nil
 	}
+	// The Adjust panel previews tone changes itself on top of this.
+	if r.URL.Query().Get("tone") == "none" {
+		page.Edits.Brightness, page.Edits.Contrast = 0, 0
+	}
 	size := r.URL.Query().Get("size")
 	if size == "" {
 		size = "preview"

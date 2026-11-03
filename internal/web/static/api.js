@@ -53,10 +53,11 @@ export const api = {
   refreshSent: (id) => request('POST', `/api/scans/${id}/sent/refresh`),
 };
 
-export function pageImage(scanId, page, size, { uncropped = false } = {}) {
+export function pageImage(scanId, page, size, { uncropped = false, untoned = false } = {}) {
   const key = size === 'thumb' ? page.thumbKey : page.previewKey;
   const crop = uncropped ? '&crop=none' : '';
-  return `/api/scans/${scanId}/pages/${page.id}/image?size=${size}&v=${key}${crop}`;
+  const tone = untoned ? '&tone=none' : '';
+  return `/api/scans/${scanId}/pages/${page.id}/image?size=${size}&v=${key}${crop}${tone}`;
 }
 
 export function pdfURL(scanId, pageIds) {

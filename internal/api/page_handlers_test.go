@@ -229,3 +229,30 @@ func TestPageImage_UncroppedForTheCropTool(t *testing.T) {
 		t.Errorf("crop=none should show the whole page: %v", got)
 	}
 }
+
+func TestPageImage_WithoutToneForTheAdjustPanel(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f", edits: pageimage.Edits{Brightness: 60, Contrast: 40}})
+
+	mean := func(path string) float64 {
+		rec := do(srv, http.MethodGet, path, nil)
+		img, err := jpeg.Decode(bytes.NewReader(rec.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		var sum float64
+		b := img.Bounds()
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				r, _, _, _ := img.At(x, y).RGBA()
+				sum += float64(r >> 8)
+			}
+		}
+		return sum / float64(b.Dx()*b.Dy())
+	}
+	toned := mean("/api/scans/job1/pages/001f/image?size=thumb")
+	untoned := mean("/api/scans/job1/pages/001f/image?size=thumb&tone=none")
+	if toned-untoned < 20 {
+		t.Errorf("tone=none should drop the brightening: toned %.0f, untoned %.0f", toned, untoned)
+	}
+}

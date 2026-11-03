@@ -288,8 +288,8 @@ function viewHome() {
             : h('div', { class: 'empty' }, h('strong', {}, 'Nothing to review'), 'Scans wait here until you send them to Paperless.'))));
 }
 
-// Laptops show the scan list beside the open scan, like Mail or Notes.
-const sideBySide = matchMedia('(min-width: 1100px)');
+// Tablets and laptops show the scan list beside the open scan, like Mail.
+const sideBySide = matchMedia('(min-width: 900px)');
 
 function viewScans(selected) {
   const scans = state.scans;
@@ -650,13 +650,14 @@ function closeViewer() {
 
 function viewerKeys(e) {
   if (!viewer || document.querySelector('.sheet-panel')) return;
-  if (e.key === 'Escape') closeViewer();
+  if (e.key === 'Escape') { if (viewer.mode === 'adjust') leaveAdjust(); else closeViewer(); }
   if (viewer.mode !== 'view') return;
   if (e.key === 'ArrowLeft') step(-1);
   if (e.key === 'ArrowRight') step(1);
 }
 
 function step(delta) {
+  if (viewer.mode !== 'view') return;
   const pages = viewerPages();
   const i = pages.findIndex((p) => p.id === viewer.pageId);
   const next = pages[i + delta];
@@ -676,17 +677,20 @@ function drawViewer() {
   const pages = viewerPages();
   const index = pages.indexOf(p);
   const existing = document.querySelector('.viewer');
+  const adjusting = viewer.mode === 'adjust';
 
-  const img = h('img', { class: 'page-img', alt: `Page ${index + 1}`, src: pageImage(scan.id, p, 'preview') });
+  const img = h('img', { class: 'page-img', alt: `Page ${index + 1}`, src: viewerImage(p) });
   const spin = h('span', { class: 'spinner loading', hidden: true });
-  img.addEventListener('load', () => { spin.hidden = true; img.style.opacity = '1'; });
-  img.style.opacity = '0.4';
-  spin.hidden = false;
+  if (!img.complete) {
+    img.style.opacity = '0.4';
+    spin.hidden = false;
+    img.addEventListener('load', () => { spin.hidden = true; img.style.opacity = '1'; }, { once: true });
+  }
   const stage = h('div', { class: 'viewer-stage' },
     img, spin,
     p.hidden && h('span', { class: 'viewer-badge' }, 'Hidden: won’t be sent'),
-    h('button', { class: 'nav-arrow prev', type: 'button', 'aria-label': 'Previous page', disabled: index === 0, onclick: () => step(-1) }, icon('chevron-left')),
-    h('button', { class: 'nav-arrow next', type: 'button', 'aria-label': 'Next page', disabled: index === pages.length - 1, onclick: () => step(1) }, icon('chevron-right')));
+    !adjusting && h('button', { class: 'nav-arrow prev', type: 'button', 'aria-label': 'Previous page', disabled: index === 0, onclick: () => step(-1) }, icon('chevron-left')),
+    !adjusting && h('button', { class: 'nav-arrow next', type: 'button', 'aria-label': 'Next page', disabled: index === pages.length - 1, onclick: () => step(1) }, icon('chevron-right')));
   let startX = null;
   stage.addEventListener('pointerdown', (e) => { startX = e.clientX; });
   stage.addEventListener('pointerup', (e) => {
@@ -704,13 +708,29 @@ function drawViewer() {
     tool(p.hidden ? 'eye' : 'eye-off', p.hidden ? 'Show' : 'Hide', () => toggleHidden(p, pages, index)),
     tool('more', 'More', openPageMenu));
 
-  const el = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Page viewer' },
-    h('div', { class: 'viewer-top' },
-      h('button', { class: 'btn plain', type: 'button', style: 'justify-self:start;font-weight:600', onclick: closeViewer }, 'Done'),
-      h('div', { class: 'count num' }, p.hidden ? (pages.length > 1 ? `Hidden page ${index + 1} of ${pages.length}` : 'Hidden page') : `Page ${index + 1} of ${pages.length}`),
-      h('span')),
-    stage, toolbar);
+  const top = h('div', { class: 'viewer-top' },
+    h('button', { class: 'btn plain start', type: 'button', onclick: closeViewer }, 'Done'),
+    h('div', { class: 'count num' }, p.hidden ? (pages.length > 1 ? `Hidden page ${index + 1} of ${pages.length}` : 'Hidden page') : `Page ${index + 1} of ${pages.length}`),
+    h('span'));
+  const adjust = adjusting && adjustControls(p, img);
+
+  // Only the first draw fades in; later draws replace an opaque viewer.
+  const el = h('div', { class: `viewer${adjusting ? ' adjusting' : ''}${existing ? ' steady' : ''}`, role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Page viewer' },
+    adjusting ? adjust.top : top, stage, adjusting ? adjust.panel : toolbar);
   if (existing) existing.replaceWith(el); else document.getElementById('layer').append(el);
+}
+
+function viewerImage(p) {
+  const untoned = viewer.mode === 'adjust' && (p.edits.color || 'color') !== 'bw';
+  return pageImage(state.scan.id, p, 'preview', { untoned });
+}
+
+function preload(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = img.onerror = resolve;
+    img.src = url;
+  });
 }
 
 // Hiding or showing moves the page to the other set, so the viewer
@@ -737,26 +757,107 @@ async function editPage(patch, { redraw = true } = {}) {
   } catch (e) { failed(e); return null; }
 }
 
-function openAdjust() {
-  const p = currentPage();
-  const e = p.edits;
-  const value = (v) => (v > 0 ? `+${v}` : String(v));
+// Adjust keeps the page in view. Each release saves; while dragging, an
+// SVG filter previews the tone on the untoned page.
+async function openAdjust() {
+  const e = currentPage().edits;
+  viewer.tone = { brightness: e.brightness || 0, contrast: e.contrast || 0 };
+  viewer.saving = Promise.resolve();
+  viewer.mode = 'adjust';
+  await preload(viewerImage(currentPage()));
+  if (!viewer || viewer.mode !== 'adjust') return;
+  drawViewer();
+  document.querySelector('.adjust-panel input:checked').focus({ preventScroll: true });
+}
+
+async function leaveAdjust() {
+  if (!viewer || viewer.mode !== 'adjust') return;
+  await viewer.saving;
+  viewer.mode = 'view';
+  await preload(viewerImage(currentPage()));
+  if (!viewer || viewer.mode !== 'view') return;
+  drawViewer();
+  const back = [...document.querySelectorAll('.toolbar button')].find((b) => b.textContent === 'Adjust');
+  if (back) back.focus({ preventScroll: true });
+}
+
+const TONE_FILTER = '<svg class="tone-filter" aria-hidden="true" focusable="false"><filter id="tone" color-interpolation-filters="sRGB">'
+  + '<feComponentTransfer><feFuncR type="linear"/><feFuncG type="linear"/><feFuncB type="linear"/></feComponentTransfer>'
+  + '<feComponentTransfer><feFuncR type="linear"/><feFuncG type="linear"/><feFuncB type="linear"/></feComponentTransfer>'
+  + '</filter></svg>';
+
+// Mirrors the server: imaging.AdjustBrightness, then AdjustContrast,
+// each clamped, which SVG does after every primitive.
+function applyTone(svg, img, { brightness, contrast }) {
+  const v = (100 + contrast) / 100;
+  const k = contrast >= 0 ? v * v : v;
+  const [shift, scale] = svg.querySelectorAll('feComponentTransfer');
+  for (const f of shift.children) { f.setAttribute('slope', '1'); f.setAttribute('intercept', String(brightness / 100)); }
+  for (const f of scale.children) { f.setAttribute('slope', String(k)); f.setAttribute('intercept', String(0.5 - 0.5 * k)); }
+  img.style.filter = brightness || contrast ? 'url(#tone)' : '';
+}
+
+function adjustControls(p, img) {
+  const tone = viewer.tone;
+  const signed = (v) => (v > 0 ? `+${v}` : String(v));
+  const holder = h('div');
+  holder.innerHTML = TONE_FILTER;
+  const svg = holder.firstChild;
+  const isBW = () => (currentPage().edits.color || 'color') === 'bw';
+  if (!isBW()) applyTone(svg, img, tone);
+
+  const save = (patch, after) => {
+    viewer.saving = viewer.saving.then(async () => {
+      const updated = await editPage(patch, { redraw: false });
+      if (updated && after) await after(updated);
+    });
+  };
+  const showServerRender = async (updated) => {
+    const url = viewerImage(updated);
+    await preload(url);
+    img.src = url;
+    if (isBW()) img.style.filter = ''; else applyTone(svg, img, tone);
+  };
+
+  const reset = h('button', { class: 'btn plain start regular', type: 'button', disabled: !tone.brightness && !tone.contrast }, 'Reset');
+  const sliders = {};
   const range = (label, key) => {
-    const out = h('span', { class: 'num' }, value(e[key] || 0));
-    const input = h('input', { type: 'range', min: -100, max: 100, step: 5, value: e[key] || 0, 'aria-label': label });
-    input.addEventListener('input', () => { out.textContent = value(Number(input.value)); });
-    input.addEventListener('change', () => editPage({ [key]: Number(input.value) }));
+    const out = h('span', { class: 'num' }, signed(tone[key]));
+    const input = h('input', { type: 'range', min: -100, max: 100, step: 5, value: tone[key], 'aria-label': label });
+    input.addEventListener('input', () => {
+      tone[key] = Number(input.value);
+      out.textContent = signed(tone[key]);
+      reset.disabled = !tone.brightness && !tone.contrast;
+      if (!isBW()) applyTone(svg, img, tone);
+    });
+    input.addEventListener('change', () => save({ [key]: tone[key] }, isBW() ? showServerRender : null));
+    sliders[key] = { input, out };
     return h('div', { class: 'field' }, h('div', { class: 'field-label' }, h('span', {}, label), out), input);
   };
-  const color = e.color || 'color';
-  const body = h('div', {},
-    h('div', { class: 'list' },
-      h('div', { class: 'field' }, h('div', { class: 'field-label' }, 'Color'),
-        segmented('adj-color', ['color', 'gray', 'bw'].map((v) => [v, COLORS_SHORT[v]]), color, (v) => editPage({ color: v }))),
-      range('Brightness', 'brightness'),
-      range('Contrast', 'contrast')),
-    h('button', { class: 'btn big', type: 'button', style: 'margin-top:16px', onclick: async () => { await editPage({ brightness: 0, contrast: 0 }); sheet.close(); toast('Brightness and contrast reset'); } }, 'Reset brightness and contrast'));
-  const sheet = openSheet({ title: 'Adjust', lede: 'Changes never touch the original scan, so you can always undo them.', body });
+  reset.addEventListener('click', () => {
+    tone.brightness = 0;
+    tone.contrast = 0;
+    for (const { input, out } of Object.values(sliders)) { input.value = 0; out.textContent = '0'; }
+    reset.disabled = true;
+    if (!isBW()) applyTone(svg, img, tone);
+    save({ brightness: 0, contrast: 0 }, isBW() ? showServerRender : null);
+  });
+
+  const color = segmented('adj-color', ['color', 'gray', 'bw'].map((v) => [v, COLORS_SHORT[v]]), p.edits.color || 'color',
+    (v) => save({ color: v }, showServerRender));
+  color.setAttribute('aria-label', 'Color');
+
+  const top = h('div', { class: 'viewer-top' },
+    reset,
+    h('div', { class: 'count' }, 'Adjust'),
+    h('button', { class: 'btn plain end', type: 'button', onclick: leaveAdjust }, 'Done'));
+  const panel = h('div', { class: 'adjust-panel' },
+    svg,
+    h('div', { class: 'field' }, color),
+    range('Brightness', 'brightness'),
+    range('Contrast', 'contrast'),
+    h('p', { class: 'field-hint' }, 'Changes never touch the original scan, so you can always undo them.'));
+  return { top, panel };
 }
 
 function openPageMenu() {
@@ -1013,7 +1114,7 @@ async function tick() {
     if (r.name === 'scan' && state.scan && !state.splitDraft) {
       if (state.scan.status === 'running') {
         state.scan = await api.scan(r.id);
-        if (viewer) drawViewer();
+        if (viewer && viewer.mode === 'view') drawViewer();
       } else if (state.paperless && state.paperless.configured && ticks % 3 === 0 && (state.scan.sent || []).some((s) => s.status === 'queued' || s.status === 'processing')) {
         state.scan = await api.refreshSent(r.id);
       }
