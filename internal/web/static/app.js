@@ -144,28 +144,35 @@ function shortError(err) {
   return (err || 'scanner problem').split(':')[0];
 }
 
-function scanStatusLine(s) {
-  const pages = plural(s.pageCount, 'page');
-  if (s.status === 'running') return 'Scanning…';
-  if (s.status === 'failed' && s.pageCount === 0) return `Stopped: ${shortError(s.error)}`;
-  if (s.sent.failed > 0) return `${pages} · Couldn’t send some documents`;
-  if (s.sent.total > 0 && s.sent.done === s.sent.total) return `${pages} · Filed in Paperless`;
-  if (s.sent.total > 0) return `${pages} · Sent, waiting for Paperless`;
-  if (s.status === 'failed') return `${pages} · Stopped early`;
-  return `${pages} · To review`;
+// "paper jam: open the scanner" → "Paper jam. Open the scanner."
+function sentence(err) {
+  if (!err) return '';
+  const [what, ...todo] = err.split(': ');
+  const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+  return [what, todo.join(': ')].filter(Boolean).map((t) => cap(t.trim()).replace(/[^.!?]$/, '$&.')).join(' ');
 }
 
-function scanRow(s) {
+function scanStatus(s) {
+  if (s.status === 'running') return { text: 'Scanning…', tone: 'blue' };
+  if (s.status === 'failed' && s.pageCount === 0) return { text: `Stopped: ${shortError(s.error)}`, tone: 'red' };
+  if (s.sent.failed > 0) return { text: 'Couldn’t send', tone: 'red' };
+  if (s.sent.total > 0 && s.sent.done === s.sent.total) return { text: 'Filed in Paperless', tone: 'green' };
+  if (s.sent.total > 0) return { text: 'Sent, waiting for Paperless', tone: '' };
+  if (s.status === 'failed') return { text: 'Stopped early · To review', tone: 'orange' };
+  return { text: 'To review', tone: 'orange' };
+}
+
+function scanRow(s, selected) {
+  const status = scanStatus(s);
   const cover = s.coverPage
     ? h('img', { class: 'thumb', alt: '', loading: 'lazy', src: `/api/scans/${s.id}/pages/${s.coverPage}/image?size=thumb&v=${s.coverKey}` })
-    : h('span', { class: 'thumb', 'aria-hidden': 'true' });
-  const line = scanStatusLine(s);
-  const tone = s.status === 'failed' || s.sent.failed > 0 ? 'text-red' : '';
-  return h('a', { class: 'cell indent', href: `#/scans/${s.id}` },
+    : h('span', { class: `thumb ${status.tone ? `text-${status.tone}` : ''}`, 'aria-hidden': 'true' }, s.status === 'running' ? h('span', { class: 'spinner' }) : icon(s.status === 'failed' ? 'alert' : 'scan'));
+  return h('a', { class: 'cell indent', href: `#/scans/${s.id}`, 'aria-current': s.id === selected ? 'page' : null },
     cover,
     h('div', { class: 'main' },
       h('div', { class: 'title' }, s.name),
-      h('div', { class: `subtitle ${tone}` }, `${timeLabel(s.createdAt)} · ${line}`)),
+      h('div', { class: 'subtitle' }, s.pageCount ? `${timeLabel(s.createdAt)} · ${plural(s.pageCount, 'page')}` : timeLabel(s.createdAt)),
+      h('div', { class: `subtitle ${status.tone ? `text-${status.tone}` : ''}` }, status.text)),
     icon('chevron-right', 'chev'));
 }
 
@@ -281,7 +288,10 @@ function viewHome() {
             : h('div', { class: 'empty' }, h('strong', {}, 'Nothing to review'), 'Scans wait here until you send them to Paperless.'))));
 }
 
-function viewScans() {
+// Laptops show the scan list beside the open scan, like Mail or Notes.
+const sideBySide = matchMedia('(min-width: 1100px)');
+
+function viewScans(selected) {
   const scans = state.scans;
   const page = h('div', { class: 'page' }, h('h1', { class: 'large-title' }, 'Scans'));
   if (scans === null) return page.appendChild(h('div', { class: 'empty' }, 'Loading…')) && page;
@@ -296,7 +306,7 @@ function viewScans() {
     groups.get(label).push(s);
   }
   for (const [label, list] of groups) {
-    page.append(h('section', { class: 'group' }, h('h2', { class: 'group-header' }, label), h('div', { class: 'list' }, list.map(scanRow))));
+    page.append(h('section', { class: 'group' }, h('h2', { class: 'group-header' }, label), h('div', { class: 'list' }, list.map((s) => scanRow(s, selected)))));
   }
   return page;
 }
@@ -335,9 +345,16 @@ function sentRow(scan, sent) {
       : null);
 }
 
+function viewMasterDetail() {
+  const r = state.route;
+  const detail = r.name === 'scan' ? viewScan() : h('div', { class: 'detail-empty' },
+    h('div', {}, icon('layers'), h('strong', {}, 'Choose a scan'), h('p', {}, 'Pick one from the list to check its pages and send it to Paperless.')));
+  return h('div', { class: 'master-detail' }, h('nav', { class: 'master', 'aria-label': 'Scans' }, viewScans(r.id)), h('div', { class: 'detail' }, detail));
+}
+
 function viewScan() {
   const scan = state.scan;
-  const back = h('button', { class: 'back', type: 'button', onclick: goBack }, icon('chevron-left'), 'Back');
+  const back = sideBySide.matches ? h('span') : h('button', { class: 'back', type: 'button', onclick: goBack }, icon('chevron-left'), 'Back');
   if (!scan) {
     return h('div', { class: 'page wide' }, h('div', { class: 'navbar' }, back),
       state.scanError ? h('div', { class: 'list' }, h('div', { class: 'empty' }, h('strong', {}, 'Scan not found'), 'It may have been deleted.'))
@@ -347,7 +364,6 @@ function viewScan() {
   const visible = scan.pages.filter((p) => !p.hidden);
   const hidden = scan.pages.filter((p) => p.hidden);
   const docs = documentsOf(scan);
-  const created = new Date(scan.createdAt);
 
   const page = h('div', { class: 'page wide' },
     h('div', { class: 'navbar' }, back, h('h1', { class: 'navbar-title' }, scan.name),
@@ -356,14 +372,19 @@ function viewScan() {
       h('div', {},
         h('h2', {}, scan.name),
         h('p', { class: 'num' }, `${dayLabel(scan.createdAt)}, ${timeLabel(scan.createdAt)} · ${plural(visible.length, 'page')} · ${scan.settings.resolution} dpi`))));
-  void created;
 
   if (running) {
     page.append(h('div', { class: 'notice blue', role: 'status' }, h('span', { class: 'spinner' }),
       h('p', {}, h('strong', {}, `Scanning… ${plural(scan.pagesScanned ?? visible.length, 'page')} so far`), 'Keep paper in the scanner, or wait for it to finish.')));
   } else if (scan.status === 'failed') {
     page.append(h('div', { class: 'notice red', role: 'alert' }, icon('alert'),
-      h('p', {}, h('strong', {}, 'Scanning stopped'), `${scan.error || 'The scanner reported a problem.'}${scan.pages.length ? ' The pages scanned before it stopped are kept.' : ''}`)));
+      h('p', {}, h('strong', {}, 'Scanning stopped'), `${sentence(scan.error) || 'The scanner reported a problem.'}${scan.pages.length ? ' The pages scanned before it stopped are kept.' : ''}`)));
+    if (!scan.pages.length) {
+      page.append(h('div', { class: 'stack' },
+        h('button', { class: 'btn primary big', type: 'button', onclick: () => scanAgain(scan) }, icon('scan'), 'Scan again'),
+        h('button', { class: 'btn plain destructive', type: 'button', onclick: () => deleteScan(scan) }, 'Delete this scan')));
+      return page;
+    }
   }
 
   if (scan.sent && scan.sent.length) {
@@ -386,7 +407,7 @@ function viewScan() {
             h('a', { href: pdfURL(scan.id, pages.map((p) => p.id)), download: '', 'aria-label': `Download document ${i + 1} as PDF` }, 'PDF'))),
         h('div', { class: 'pages' }, pages.map((p) => tile(scan, p, `Page ${++n}`)))));
     });
-    if (running) page.append(h('div', { class: 'pages', 'aria-hidden': 'true' }, h('div', { class: 'tile placeholder' }, h('span', { class: 'sheet' }))));
+    if (running) page.append(h('div', { class: 'pages', 'aria-hidden': 'true' }, h('div', { class: 'tile placeholder' }, h('span', { class: 'sheet' }), `Page ${n + 1}`)));
   }
 
   if (hidden.length && !state.splitDraft) {
@@ -394,12 +415,12 @@ function viewScan() {
       icon('eye-off'), h('div', { class: 'main' },
         h('div', { class: 'title' }, `${plural(hidden.length, 'hidden page')}`),
         h('div', { class: 'subtitle' }, 'Backs that looked blank. They won’t be sent unless you show them.')),
-      h('span', { class: 'value' }, state.hiddenOpen ? 'Hide' : 'Show'));
+      h('span', { class: 'value action' }, state.hiddenOpen ? 'Hide' : 'Show'));
     page.append(h('section', { class: 'group' }, h('div', { class: 'list' }, toggle),
       state.hiddenOpen && h('div', { class: 'pages', style: 'margin-top:16px' }, hidden.map((p) => tile(scan, p, 'Hidden')))));
   }
 
-  page.append(actionBar(scan, visible, running));
+  if (running || scan.pages.length) page.append(actionBar(scan, visible, running));
   return page;
 }
 
@@ -418,7 +439,7 @@ function actionBar(scan, visible, running) {
   return h('div', { class: 'actionbar' },
     h('button', { class: 'btn', type: 'button', disabled: none || visible.length < 2, onclick: () => { state.splitDraft = new Set(scan.splits || []); render(); } }, icon('scissors'), 'Split'),
     pdf,
-    h('button', { class: `btn${allFiled ? '' : ' primary'}`, type: 'button', disabled: none, onclick: () => openSend(scan) }, icon('send'), allFiled ? 'Send again' : 'Send'));
+    h('button', { class: `btn send${allFiled ? '' : ' primary'}`, type: 'button', disabled: none, onclick: () => openSend(scan) }, icon('send'), allFiled ? 'Send again' : 'Send'));
 }
 
 function splitEditor(scan, visible) {
@@ -461,16 +482,31 @@ function openScanMenu(scan) {
   const sheet = openSheet({ title: scan.name, body: h('div', { class: 'list' }, rename, pdf, del) });
   rename.addEventListener('click', () => { sheet.close(); setTimeout(() => openRename(scan), 230); });
   pdf.addEventListener('click', () => sheet.close());
-  del.addEventListener('click', async () => {
-    sheet.close();
+  del.addEventListener('click', () => { sheet.close(); deleteScan(scan); });
+}
+
+async function deleteScan(scan) {
+  if (scan.pages.length) {
     const sent = scan.sent && scan.sent.length ? ' Anything already sent to Paperless stays there.' : '';
     if (!(await confirmSheet({ title: 'Delete this scan?', text: `Its ${plural(scan.pages.length, 'page')} will be deleted from the scanner.${sent}`, confirm: 'Delete scan', destructive: true }))) return;
-    try {
-      await api.deleteScan(scan.id);
-      toast('Scan deleted');
-      location.hash = '#/scans';
-    } catch (e) { failed(e); }
-  });
+  }
+  try {
+    await api.deleteScan(scan.id);
+    toast('Scan deleted');
+    location.hash = '#/scans';
+  } catch (e) { failed(e); }
+}
+
+// Retries a scan that stopped before any page came out, with the same
+// settings, and drops the empty one.
+async function scanAgain(scan) {
+  try {
+    const { jobId } = await api.startScan(scan.settings);
+    api.deleteScan(scan.id).catch(() => {});
+    location.hash = `#/scans/${jobId}`;
+  } catch (e) {
+    toast(e.code === 'no_paper' ? 'Put paper in the scanner first' : e.code === 'scanner_unavailable' ? 'The scanner is off. Press its power button.' : e.message);
+  }
 }
 
 function openRename(scan) {
@@ -589,8 +625,13 @@ function documentForm(scan, pages, i, total, meta) {
 
 let viewer = null;
 
+// The viewer pages through visible pages, numbered as in the grid, or
+// through the hidden ones when it was opened on a hidden page.
 function viewerPages() {
-  return state.scan ? state.scan.pages : [];
+  if (!state.scan) return [];
+  const current = state.scan.pages.find((p) => p.id === viewer.pageId);
+  const hidden = Boolean(current && current.hidden);
+  return state.scan.pages.filter((p) => Boolean(p.hidden) === hidden);
 }
 
 function openViewer(pageId) {
@@ -660,26 +701,37 @@ function drawViewer() {
     tool('rotate', 'Rotate', () => editPage({ rotation: ((p.edits.rotation || 0) + 90) % 360 })),
     tool('crop', 'Crop', startCrop),
     tool('sliders', 'Adjust', openAdjust),
-    tool(p.hidden ? 'eye' : 'eye-off', p.hidden ? 'Show' : 'Hide', () => editPage({ hidden: !p.hidden }).then(() => toast(p.hidden ? 'Page will be sent' : 'Page hidden'))),
+    tool(p.hidden ? 'eye' : 'eye-off', p.hidden ? 'Show' : 'Hide', () => toggleHidden(p, pages, index)),
     tool('more', 'More', openPageMenu));
 
   const el = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Page viewer' },
     h('div', { class: 'viewer-top' },
       h('button', { class: 'btn plain', type: 'button', style: 'justify-self:start;font-weight:600', onclick: closeViewer }, 'Done'),
-      h('div', { class: 'count num' }, `Page ${index + 1} of ${pages.length}`),
+      h('div', { class: 'count num' }, p.hidden ? (pages.length > 1 ? `Hidden page ${index + 1} of ${pages.length}` : 'Hidden page') : `Page ${index + 1} of ${pages.length}`),
       h('span')),
     stage, toolbar);
   if (existing) existing.replaceWith(el); else document.getElementById('layer').append(el);
 }
 
-async function editPage(patch) {
+// Hiding or showing moves the page to the other set, so the viewer
+// moves on to its neighbor in the set being browsed.
+async function toggleHidden(p, pages, index) {
+  const neighbor = pages[index + 1] || pages[index - 1];
+  const updated = await editPage({ hidden: !p.hidden }, { redraw: false });
+  if (!updated) return;
+  toast(updated.hidden ? 'Page hidden' : 'Page will be sent');
+  if (neighbor) viewer.pageId = neighbor.id;
+  drawViewer();
+}
+
+async function editPage(patch, { redraw = true } = {}) {
   const scan = state.scan;
   const p = currentPage();
   try {
     const updated = await api.editPage(scan.id, p.id, patch);
     const i = scan.pages.findIndex((x) => x.id === p.id);
     scan.pages[i] = updated;
-    drawViewer();
+    if (redraw) drawViewer();
     render();
     return updated;
   } catch (e) { failed(e); return null; }
@@ -854,7 +906,7 @@ async function startScan() {
     location.hash = `#/scans/${jobId}`;
   } catch (e) {
     state.starting = false;
-    if (e.code === 'no_paper') state.notice = { tone: 'orange', title: 'No paper', text: 'Put paper in the top tray or the back slot, then tap Scan.' };
+    if (e.code === 'no_paper') state.notice = { tone: 'orange', title: 'No paper', text: 'Put paper in the scanner, then tap Scan.' };
     else if (e.code === 'scanner_unavailable') state.notice = { tone: 'orange', icon: 'power', title: 'The scanner is off', text: 'Press its power button, wait a few seconds, then tap Scan.' };
     else if (e.status === 409 && e.code !== 'no_paper') state.notice = { tone: 'blue', title: 'Already scanning', text: 'Wait for the current scan to finish.' };
     else state.notice = { tone: 'red', title: 'Couldn’t start the scan', text: e.message };
@@ -884,7 +936,9 @@ let lastSignature = '';
 function render(force = true) {
   const view = document.getElementById('view');
   const r = state.route;
-  const node = r.name === 'home' ? viewHome() : r.name === 'scans' ? viewScans() : r.name === 'settings' ? viewSettings() : viewScan();
+  const split = sideBySide.matches && (r.name === 'scans' || r.name === 'scan');
+  const node = split ? viewMasterDetail() : r.name === 'home' ? viewHome() : r.name === 'scans' ? viewScans() : r.name === 'settings' ? viewSettings() : viewScan();
+  view.classList.toggle('flush', split);
   const sig = node.outerHTML;
   if (!force && sig === lastSignature) return;
   lastSignature = sig;
@@ -928,7 +982,7 @@ async function onRoute() {
 async function refresh() {
   const r = state.route;
   try {
-    if (r.name === 'home' || r.name === 'scans') state.scans = await api.scans();
+    if (r.name === 'home' || r.name === 'scans' || (r.name === 'scan' && sideBySide.matches)) state.scans = await api.scans();
     if (r.name === 'scan') {
       try { state.scan = await api.scan(r.id); } catch (e) { if (e.status === 404) state.scanError = e; else throw e; }
     }
@@ -964,7 +1018,8 @@ async function tick() {
         state.scan = await api.refreshSent(r.id);
       }
     }
-    if ((r.name === 'home' || r.name === 'scans') && (busy || wasBusy !== busy || ticks % 5 === 0)) state.scans = await api.scans();
+    const listed = r.name === 'home' || r.name === 'scans' || (r.name === 'scan' && sideBySide.matches);
+    if (listed && (busy || wasBusy !== busy || ticks % 5 === 0)) state.scans = await api.scans();
   } catch { /* the status cell already reports reachability */ }
   if (!viewer && !document.querySelector('.sheet-panel')) render(false);
 }
@@ -972,6 +1027,7 @@ async function tick() {
 /* ---------- Start ---------- */
 
 async function start() {
+  sideBySide.addEventListener('change', () => refresh());
   let options = { defaults: { resolution: 300, sides: 'auto', color: 'auto' }, resolutions: [200, 300, 600] };
   try { options = await api.options(); } catch { /* keep defaults */ }
   state.options = options;
