@@ -1,6 +1,12 @@
 .git
 .github
+.impeccable
 *.md
+.env
+.env.*
 coverage.out
+coverage.filtered.out
 coverage.html
 data/
+demo/
+doxie-scanner

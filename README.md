@@ -1,309 +1,250 @@
 # Doxie Scanner
 
-A standalone, linux focused, self-hosted web app for driving a **Doxie Pro DX400** document scanner. Talks to the scanner directly over raw SCSI-over-USB-bulk — no
-SANE, no `scanimage`, no vendor drivers — with a simple web UI for
-scanning, reviewing, rotating/cropping, and exporting pages as PNG, JPEG,
-or PDF.
+Run a **Doxie Pro DX400** from a Raspberry Pi and send what you scan to
+[Paperless-ngx](https://docs.paperless-ngx.com/). You scan from your
+phone (or press the button on the scanner), check and fix the pages,
+split a stack into separate documents, and send them to Paperless. You
+don't need Doxie's app or a computer.
 
-Ships as a single Docker image with the frontend baked into the binary.
+<p>
+  <img src="docs/screenshots/phone-home.png" width="260" alt="Scanner screen on a phone: status, Scan button, scans waiting for review">
+  <img src="docs/screenshots/phone-scan.png" width="260" alt="A scan split into two documents, with Split, PDF and Send buttons">
+  <img src="docs/screenshots/phone-send.png" width="260" alt="Sending two documents to Paperless with title, date, correspondent and tags">
+</p>
 
-**Linux only, and specifically the Doxie Pro DX400** — this isn't a
-general Avision/Doxie driver. It talks to one exact device (USB VID:PID
-`2740:000c`) via the raw USB device nodes under `/dev/bus/usb`, which is
-a Linux-specific interface; it will not run on macOS or Windows, and it
-will not recognize any other scanner, including other Doxie models.
+This is a fork of [andiapps-dev/doxie-scanner](https://github.com/andiapps-dev/doxie-scanner).
+The scanner driver has been rewritten to use the scanner's built-in
+JPEG mode, which is several times faster than reading raw pixels. The
+web app was rebuilt for phones, and Paperless support was added.
 
-> Not affiliated with, endorsed by, or sponsored by Doxie, Apparent Corp.,
-> or Avision. "Doxie" and "Doxie Pro" are trademarks of their respective
-> owners, referenced here only to describe hardware compatibility.
+> Not affiliated with, endorsed by, or sponsored by Doxie, Apparent
+> Corp., or Avision. "Doxie" and "Doxie Pro" are trademarks of their
+> respective owners, named here only to describe hardware compatibility.
 
-![Doxie Scanner demo](demo/output/doxie-scanner-demo.gif)
+## What it does
 
-## How this was built
+- **Scan** from any phone, tablet or laptop on your network, or press
+  the button on the scanner. Button scans wait under *To review* until
+  someone checks and sends them; nothing goes to Paperless by itself.
+- **Scan settings:** 200, 300 or 600 dpi. Choose one side, both sides,
+  or *Auto*, which scans both sides and hides backs that look blank.
+  Hidden pages are kept, so you can bring one back. Color can be color,
+  gray, black & white, or *Auto*, which picks per page.
+- **Fix pages:** rotate, crop, brightness, contrast, color mode, hide,
+  delete, reorder. Edits never change the scan itself, so you can always
+  undo them.
+- **Split** a stack into several documents by tapping between pages.
+- **Send to Paperless** with a title, date, correspondent, document type
+  and tags picked from your Paperless lists. Anything left blank is up
+  to Paperless's own matching rules. The app follows each upload until
+  Paperless has filed it, then links to the document.
+- **Download PDFs** straight to your phone: the whole scan, one
+  document, or a single page. On an iPhone, open the PDF and choose
+  Share → Save to Files.
+- **Clean up after itself:** once Paperless has filed every page of a
+  scan, the scan is deleted after 7 days. You can change this to 1 or
+  30 days, or keep scans forever. Scans you haven't sent are never
+  deleted.
 
-This driver implements the standard **SCSI-2 scanner command set**
-(INQUIRY, SET WINDOW, READ, SEND, SCAN, RESERVE/RELEASE UNIT) that the
-device speaks over plain USB bulk transfers — the same generic protocol
-family SANE's `avision` backend uses, not any Doxie/Avision-proprietary
-transport.
+On a laptop, the scan list sits beside the open scan, and light and
+dark mode follow your device.
 
-The exact byte sequences this hardware expects were captured from a
-`usbmon` packet trace of a real scan and reimplemented from scratch
-against that observed wire data — no vendor or SANE source code is
-copied anywhere in this repository. A locally-patched build of SANE's
-(GPL-2.0) `avision` backend was used once, purely as a diagnostic tool to
-get this specific device talking to SANE long enough to capture its
-traffic; that patched build was never distributed and isn't part of this
-project. Reverse-engineering a protocol from observed traffic and
-independently reimplementing it is the same well-established basis
-projects like Samba, Wine, and ReactOS rely on — this repo contains only
-that independent reimplementation, licensed under MIT (see LICENSE).
+## What you need
 
-## Features
+- A Doxie Pro DX400 (USB ID `2740:000c`). Other Doxie models won't work.
+- A Raspberry Pi 3B or newer running Raspberry Pi OS Lite (64-bit is
+  best), or any other Linux machine that runs Docker.
+- Paperless-ngx somewhere on your network. It's optional: without it,
+  you can still scan and download PDFs.
 
-- Start single or multi-page (ADF) scans, simplex or duplex, from the browser
-- "Start scan" is only enabled once the scanner is actually reachable — a
-  live "connected / not connected" status badge backs it, no page refresh needed
-- **Duplex scans number each side as its own independent page.** One
-  duplex sheet followed by one simplex sheet produces 3 pages: 1 and 2
-  are the duplex sheet's front and back, 3 is the simplex sheet — pages
-  are numbered by image, not by physical sheet
-- Automatic blank-back detection for duplex scans: a blank back simply
-  doesn't become a page, rather than producing an empty one to delete later
-- Click any page to open it in a full-size viewer with rotate (left/right
-  90° — click repeatedly for 180°/270°), crop, export, delete, and OCR
-  actions all in one place
-- **Extract Text** runs OCR on a page and shows the result in a
-  copy-pasteable box — automatically corrects a crooked scan first, since
-  even a few degrees of skew measurably hurts recognition accuracy
-- Drag and drop to reorder pages within a scan
-- Export a single page as PNG, JPEG, or PDF; export a whole scan as one
-  combined PDF with one click; or hand-pick pages from **any number of
-  past scans**, in any order, into one combined PDF
-- Auto-named scans ("Scan 2026-07-14 15:30"), renamable afterward, with
-  the scan list showing creation date/time and page count so similarly
-  named scans stay easy to tell apart
-- The UI is available in English and Spanish, auto-detected from the
-  browser with a manual override (navbar dropdown, remembered for next
-  time)
-- No authentication, no database — just a REST API and a folder of files
+## Set it up on a Raspberry Pi
 
-## Requirements
+1. Install **Raspberry Pi OS Lite** with
+   [Raspberry Pi Imager](https://www.raspberrypi.com/software/). In its
+   settings, set a hostname (say `scanner`) and turn on SSH.
 
-- Docker (or a Go 1.26+ toolchain with a C compiler and libusb-1.0 dev
-  headers, if running outside Docker)
-- A Doxie Pro DX400 scanner connected over USB
-- **A persistent volume mounted at `/data`.** This is not optional: scan
-  data lives only in this directory, and if it's not backed by a real
-  bind mount, every scan is lost the moment the container is recreated.
-  The app refuses to start if `/data` isn't writable, but it cannot
-  detect "writable anonymous volume" vs. "real persistent bind mount" —
-  that part is on you. Always use `-v <host-path>:/data`.
+2. Install Docker using Docker's convenience script, then let your user
+   run it:
 
-## Quick start
+   ```bash
+   curl -fsSL https://get.docker.com | sh
+   sudo usermod -aG docker $USER   # then log out and back in
+   ```
 
-```bash
-docker run -d \
-  --name doxie-scanner \
-  -p 8080:8080 \
-  -v ./data:/data \
-  -v /dev/bus/usb:/dev/bus/usb \
-  --device-cgroup-rule='c 189:* rmw' \
-  ghcr.io/andiapps-dev/doxie-scanner:latest
-```
+3. Get this repository and add your Paperless details:
 
-Or with Compose:
+   ```bash
+   git clone https://github.com/jasonlearst/doxie-scanner.git
+   cd doxie-scanner
+   cp .env.example .env
+   nano .env
+   ```
 
-```bash
-docker compose up -d
-```
+   The token is in Paperless under your name (top right) → *My Profile*
+   → *API Auth Token*.
 
-Then open `http://localhost:8080`.
+4. Plug in the scanner, switch it on, and check that the Pi sees it:
 
-### USB passthrough
+   ```bash
+   lsusb -d 2740:000c
+   ```
 
-**Use the `-v /dev/bus/usb:/dev/bus/usb` + `--device-cgroup-rule='c 189:* rmw'`
-combo shown above, not plain `--device=/dev/bus/usb`.** This matters more
-than it looks: Docker's `--device` flag walks the directory *once, at
-container start* and writes a device-cgroup ACL rule for each specific
-bus/device number it finds at that moment. Unplugging and replugging the
-scanner gets it a *new* bus/device number — the container can still see
-that file (the bind mount is live), but the ACL computed at startup never
-covered it, so opening it fails with something like
-`libusb: no device [code -4]` even though `lsusb` shows the scanner fine.
-`189` is the USB device major number and `*` matches any minor, so the
-cgroup rule above covers whatever bus/device number the kernel assigns,
-including ones that show up after the container is already running — no
-restart needed after a reconnect.
+5. Build and start the app. The first build on a Pi 3B takes a while.
 
-Note this cgroup rule can't be scoped tighter than "all USB devices" (major
-189) while still surviving reconnects — cgroup device rules match kernel
-device numbers, not USB vendor/product IDs, and the whole reason for the
-wildcard is that the number changes on every reconnect. There's no way to
-name just this one scanner at that level.
+   ```bash
+   docker compose up -d --build
+   ```
 
-The provided `udev/99-doxie-scanner.rules` (installed on the **host**, not
-in the container) is solving a different, unrelated problem: the
-container image runs as root by default specifically so it doesn't need
-that rule (root can open any device node regardless of its file
-permissions). If you harden the container to run as a non-root user
-instead, standard Unix file permissions on the device node (typically
-`root:root`, mode 0664) become the second gate a non-root process must
-also clear — that's what the udev rule's `MODE="0666"` is for. It doesn't
-replace or narrow the cgroup rule above; the two operate at different
-layers (cgroup ACL: can this container touch USB devices at all; file
-permissions: can this specific UID open this specific node).
+6. On your phone, open `http://scanner.local:8080`, or use the Pi's IP
+   address. To get an app icon, use *Add to Home Screen*.
 
-Either way, confirm the scanner shows up before troubleshooting the app:
+To update later, run `git pull && docker compose up -d --build`.
 
-```bash
-lsusb -d 2740:000c
-```
+The app keeps its scans in `./data`. It has no login, so keep it on
+your home network.
 
-## Using the web UI
+### USB access
 
-- **Scans list** (left panel): shows every scan with its creation
-  date/time and page count, newest first. The selected scan is
-  highlighted. Click a scan to view its pages.
-- **Page grid**: one tile per page — a duplex sheet's front and back are
-  two separate tiles, tiled to fill the available width before wrapping
-  to the next row. Drag a tile to reorder it — page numbers/URLs don't
-  change, only their position in the scan.
-- **Page viewer**: click any page tile to open it full-size, with all
-  editing actions (rotate, crop, export, delete) in one place. Cropping
-  uses the already-loaded full-size image, so the crop tool never has to
-  resize itself mid-edit. A spinner covers the screen while an action
-  that round-trips through the server (rotate, crop, export, combine) is
-  in flight.
-- **Combine into PDF**: check "select for combine" on any pages (in the
-  grid or the viewer) — across as many different scans as you like — and
-  a bar at the bottom shows a thumbnail of every page you've picked so
-  far. Drag those thumbnails to set the order the combined PDF comes out
-  in, or click the × on one to drop it from the selection, all without
-  leaving the bar. For a single scan, "Export scan as PDF" in its header
-  does the same for every page in that scan in one click.
+The Compose file passes USB through with a bind mount and a device
+cgroup rule (`c 189:* rmw`), not `devices:`. When the scanner switches
+itself off and on again it gets a new USB device number. A `devices:`
+entry only grants access to the number that existed when the container
+started, so after that the app would see the scanner but couldn't open
+it. Major number 189 covers all USB devices, and the wildcard covers
+whatever number the scanner gets next. The rule can't be narrowed to
+just this scanner: cgroup rules match device numbers, not USB IDs.
 
-## Scripts
+The container runs as root, so it can open the device node. To run it
+as a normal user instead, install `udev/99-doxie-scanner.rules` on the
+host. The rule makes the scanner's device node readable and writable by
+everyone.
 
-- `./build.sh [docker|local]` — build the Docker image (default) or a
-  native binary at `./doxie-scanner`. Set `VERSION=v1.2.0` to bake a
-  version into the build (see Releasing below); defaults to `dev`.
-- `./test.sh` — `go vet` + `go build` + `go test` with the same coverage
-  gate CI enforces (see Coverage below)
-- `./run.sh` — run the locally-built image with the required data volume
-  and USB passthrough already wired in
+## Using the scanner
 
-## API reference
-
-All endpoints are JSON except where noted. No authentication.
-
-| Method & path | Purpose |
-|---|---|
-| `GET /api/version` | `{"version": "..."}` — the git tag this build was released from, or `"dev"` for a local/untagged build. |
-| `GET /api/scanner/status` | `{connected, vid, pid, driver, error?}` — always 200; "not connected" is a normal poll result, not an HTTP error. |
-| `POST /api/scans` | `{"duplex": bool}` → starts a scan job. `202 {jobId, status}`. `409` if a scan is already running. |
-| `GET /api/scans` | List jobs, newest first. |
-| `GET /api/scans/{id}` | Full job detail + pages; while running, also includes live `pagesScanned` progress. |
-| `PATCH /api/scans/{id}` | `{"name": "..."}` — rename a scan. |
-| `DELETE /api/scans/{id}` | Delete a scan and all its pages. |
-| `GET /api/scans/{id}/pages/{n}` | Raw page PNG. |
-| `DELETE /api/scans/{id}/pages/{n}` | Delete one page. |
-| `PATCH /api/scans/{id}/pages/order` | `{"order": [3,1,2]}` — reorders a scan's pages (a permutation of its existing page numbers). Page numbers, URLs, and filenames don't change — only their position. |
-| `POST /api/scans/{id}/pages/{n}/rotate` | `{"degrees": 90\|180\|270}` — clockwise, in place. |
-| `POST /api/scans/{id}/pages/{n}/crop` | `{"x","y","width","height"}` — in place. |
-| `GET /api/scans/{id}/pages/{n}/export?format=png\|jpg\|pdf` | Single-page export, downloaded as an attachment. |
-| `GET /api/scans/{id}/pages/{n}/ocr` | `{"text": "..."}` — runs OCR (with automatic deskew) and returns the recognized text. Not cached; regenerated on every call. |
-| `POST /api/export/combine` | `{"pages":[{"jobId","page"}...], "title"}` — combines pages **from any scans** into one PDF, in the given order. |
-
-Errors look like:
-
-```json
-{"error": {"code": "device_not_found", "message": "no USB device with VID 0x2740 PID 0x000c found — is it powered on and connected?"}}
-```
-
-| Code | Meaning |
-|---|---|
-| `device_not_found` | No matching USB device. Check power and cabling; confirm with `lsusb -d 2740:000c`. |
-| `claim_interface_failed` | Device found, but its USB interface couldn't be claimed — usually a permissions issue (see USB passthrough above) or another process already has it open. |
-| `scsi_error` | A SCSI command failed in a way that isn't a normal end-of-document condition. |
-| `not_found` | The requested job or page doesn't exist. |
-| `bad_request` | Malformed input (bad JSON, invalid page number, unsupported export format, etc). |
-
-## Extending to other scanners
-
-This app is built around a small `driver.Driver`/`driver.Session`
-interface (`internal/driver`); nothing in job orchestration, storage, the
-HTTP API, or the frontend knows about the Doxie DX400 specifically. A
-second Avision-family scanner could reuse `internal/scsiusb` (the generic
-USB-bulk + SCSI-CDB transport) unchanged and only needs its own protocol
-constants and sense-code classification — see `internal/doxiedx400` for
-the reference implementation. Select which driver runs via the
-`DOXIE_DRIVER` environment variable (default `doxie-dx400`).
+- **If the scanner has switched itself off** after sitting idle, the app
+  shows *Off*. Press the scanner's power button and the app reconnects
+  by itself.
+- **All three paper paths work:** the top tray, the slot at the back,
+  and the tray at the front.
+- **A sheet left sitting in the front tray for about a minute** can
+  make the scanner report a jam. Put paper in and scan straight away.
+- **After a jam,** open the scanner, take the sheet out, and switch it
+  off and on.
 
 ## Configuration
 
-| Env var | Default | Purpose |
+| Variable | Default | Purpose |
 |---|---|---|
-| `DOXIE_DATA_DIR` | `/data` | Where scan jobs are stored. Must be writable; see above. |
+| `DOXIE_PAPERLESS_URL` | | Paperless-ngx address. Set this and the token to enable sending. |
+| `DOXIE_PAPERLESS_TOKEN` | | Paperless API token. |
+| `DOXIE_DATA_DIR` | `/data` | Where scans are kept. Must be writable. |
 | `DOXIE_LISTEN_ADDR` | `:8080` | HTTP listen address. |
-| `DOXIE_DRIVER` | `doxie-dx400` | Which registered driver to use. |
-| `DOXIE_OCR_LANG` | `eng` | Tesseract language code "Extract Text" uses. Anything besides `eng` needs the matching `tesseract-ocr-data-<lang>` package added to a custom build — only English data ships in the published image. |
+| `DOXIE_DRIVER` | `doxie-dx400` | Which scanner driver to use. |
 
-## Local development
+Everything else, such as the button's scan settings and how long filed
+scans are kept, is set in the app under Settings.
 
-Requires cgo and libusb-1.0 dev headers (`libusb-1.0-0-dev` on
-Debian/Ubuntu, `libusb-dev` on Alpine):
+## How it works
+
+The DX400 is Avision hardware. Doxie's own drivers talk to it with a
+vendor set of 12-byte commands, in which the scanner compresses each
+side to JPEG itself. That's what this driver uses. A 300 dpi duplex
+sheet takes about 6.5 seconds.
+
+The command sequence was worked out from USB captures of Doxie's
+official app scanning on Windows (USBPcap), then rewritten from scratch.
+No vendor or SANE code is included. Some details:
+
+- Commands go out as vendor control transfers. Data comes back over
+  bulk endpoint `0x81`, and button presses arrive on interrupt endpoint
+  `0x83`.
+- The scanner sends bare JPEG scan data. The driver adds the headers
+  around it: quantization tables captured per resolution, the standard
+  Huffman tables, and a 4:2:2 frame header that crops the scanner's
+  padding.
+- In duplex scans, the scanner alternates front and back chunks. The
+  sense data after each side's last chunk says how many bytes and lines
+  that side had.
+- 200 dpi is read at 300 × 200 dpi. The app squares the pixels when it
+  displays or exports the page.
+
+The scanner's original JPEGs are stored untouched. Edits are saved as
+settings and applied when a page is shown or exported. A PDF of
+unedited pages embeds the original JPEGs, with no re-compression.
+Black-and-white pages go in as PNG.
+
+| Package | What it does |
+|---|---|
+| `internal/doxiedx400` | The DX400 driver: commands, scan window, JPEG headers, duplex, button |
+| `internal/scsiusb` | USB transport: command/status/sense exchange, libusb adapter |
+| `internal/scanjobs` | The one loop that owns the scanner: reconnects, button, scans |
+| `internal/pageimage` | Blank-page and color detection, non-destructive edits |
+| `internal/storage` | Scans on disk (`meta.json` plus original JPEGs), settings |
+| `internal/paperless` | Paperless-ngx API client |
+| `internal/housekeeping` | Follows uploads, deletes filed scans after the retention period |
+| `internal/pdfexport` | PDF assembly |
+| `internal/api` | HTTP API |
+| `internal/web/static` | The web app: plain HTML, CSS and JavaScript, with no build step |
+
+## Development
+
+You need Go 1.26 or newer, a C compiler, and libusb-1.0 with pkg-config:
+`libusb-1.0-0-dev` on Debian and Ubuntu, `brew install libusb pkg-config`
+on macOS. The app also runs on macOS, which is handy with the scanner
+plugged into a laptop:
 
 ```bash
-go build ./...
-go vet ./...
-go test ./...
+DOXIE_DATA_DIR=./data DOXIE_LISTEN_ADDR=127.0.0.1:8080 go run .
 ```
 
-### Coverage
+`./test.sh` runs `go vet`, the tests, and the same coverage gate as CI
+(at least 95%, not counting `internal/scsiusb/usbdevice.go`, which only
+talks to real hardware). Everything else is tested against fake
+scanners and a fake Paperless.
 
-This project targets **≥95% Go test coverage**, achieved by isolating the
-one genuinely hardware-dependent file
-(`internal/scsiusb/usbdevice.go` — a thin adapter over real USB calls
-that can't be meaningfully exercised without the physical scanner) behind
-an interface, with everything else — protocol/CDB construction, the
-retry/sense state machine, image processing, job orchestration, PDF
-export, and the full HTTP API — tested against in-memory fakes.
+The real scanner has its own test, which doesn't run by default:
 
 ```bash
-go test -coverprofile=coverage.out ./...
-grep -v internal/scsiusb/usbdevice.go coverage.out > coverage.filtered.out
-go tool cover -func=coverage.filtered.out | tail -1
-go tool cover -html=coverage.filtered.out -o coverage.html
+DX400_RES=300 DX400_DUPLEX=1 DX400_OUT=/tmp/dx400 \
+  go test -tags hardware -run TestHardwareScan -v ./internal/doxiedx400
 ```
 
-The frontend (`internal/web/static/app.js`) is plain vanilla JS and is
-not part of this coverage figure.
+### API
+
+Everything is JSON unless noted. There's no authentication.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/scanner/status` | Connected, scanning, paper loaded, or why the scanner can't be reached |
+| `GET /api/scan-options` | Resolutions and defaults |
+| `GET`, `PUT /api/settings` | Button scan settings and `retentionDays` (0 keeps scans forever) |
+| `POST /api/scans` | Start a scan: `{"resolution": 300, "sides": "auto", "color": "auto"}` |
+| `GET /api/scans` | All scans, newest first |
+| `GET`, `PATCH`, `DELETE /api/scans/{id}` | One scan; `PATCH` takes `name` and `splits` |
+| `GET /api/scans/{id}/pdf` | PDF download; `?pages=001f,001b` limits it to those pages |
+| `PUT /api/scans/{id}/pages/order` | Reorder pages |
+| `PATCH`, `DELETE /api/scans/{id}/pages/{page}` | Edit (`rotation`, `crop`, `brightness`, `contrast`, `color`, `hidden`) or delete a page |
+| `GET /api/scans/{id}/pages/{page}/image` | Rendered page: `?size=thumb` or `preview`, `&crop=none` |
+| `GET /api/scans/{id}/pages/{page}/original` | The scanner's JPEG, untouched |
+| `POST /api/scans/{id}/send` | Send documents to Paperless |
+| `POST /api/scans/{id}/sent/refresh` | Ask Paperless about uploads still in progress |
+| `GET /api/paperless`, `/api/paperless/metadata` | Connection status; tags, correspondents and document types |
+| `GET /api/version` | The release this build came from |
+
+Errors look like `{"error": {"code": "no_paper", "message": "..."}}`.
 
 ## Releasing
 
-Versions are git tags on this repo, following [Semantic
-Versioning](https://semver.org/): `vMAJOR.MINOR.PATCH` (e.g. `v1.2.0`).
-Bump PATCH for fixes, MINOR for backward-compatible features, MAJOR for
-a breaking change to the HTTP API or the on-disk `meta.json` schema.
-
-Pushing a `vX.Y.Z` tag does the rest automatically:
-`.github/workflows/docker-publish.yml` re-runs the full CI test/coverage
-gate, then — only if that passes — builds the image with `main.version`
-set to the tag (surfaced at `GET /api/version`), pushes
-`ghcr.io/andiapps-dev/doxie-scanner` tagged `X.Y.Z`, `X.Y`, and `latest`,
-and creates a GitHub Release for the tag with auto-generated notes. A
-plain push to `main` with no tag only runs CI — it never publishes an
-image, so `:latest` always means "latest release," not "whatever's
-currently on main."
-
-## Duplex is on by default
-
-Earlier revisions of this README warned of a front-side color cast
-whenever duplex mode was requested, and defaulted the UI to simplex to
-avoid it. That didn't hold up: isolating the duplex SET WINDOW payload's
-two changed bytes (the doubled `line_count` and the bit that enables the
-scanner's second CIS sensor) and testing each independently against real
-hardware, on a freshly power-cycled scanner, produced **no cast under
-any combination** — including full duplex. The original observation was
-most likely a symptom of the scanner having degraded from many rapid
-back-to-back test scans in one session (a confound the original hardware
-research notes explicitly flagged and never re-verified against a clean
-device). Duplex is now the default.
-
-One thing this hasn't specifically tested: whether the cast could still
-depend on the rear sensor reading actual printed content rather than
-blank paper (the test page used was blank on the back). If you notice a
-color cast in practice, that's the next thing to isolate — please open
-an issue with a sample image.
+Releases are `vX.Y.Z` git tags. Pushing one runs CI, then builds the
+image for amd64, arm64 and arm/v7, pushes it to
+`ghcr.io/<owner>/doxie-scanner`, and creates a GitHub release. A plain
+push to `main` only runs CI.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT; see [LICENSE](LICENSE).
 
-This project uses [`google/gousb`](https://github.com/google/gousb)
-(Apache-2.0) for USB access, [`disintegration/imaging`](https://github.com/disintegration/imaging)
-(MIT) for rotate/crop, and [`go-pdf/fpdf`](https://github.com/go-pdf/fpdf)
-(MIT) for PDF generation. The frontend vendors
-[Bootstrap](https://getbootstrap.com/) / [Bootswatch "Flatly"](https://bootswatch.com/flatly/)
-(MIT) and [Cropper.js](https://fengyuanchen.github.io/cropperjs/) (MIT).
+Uses [google/gousb](https://github.com/google/gousb) (Apache-2.0),
+[disintegration/imaging](https://github.com/disintegration/imaging)
+(MIT), [go-pdf/fpdf](https://github.com/go-pdf/fpdf) (MIT) and
+[Cropper.js](https://fengyuanchen.github.io/cropperjs/) (MIT).

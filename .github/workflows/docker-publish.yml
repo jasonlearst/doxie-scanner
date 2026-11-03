@@ -29,6 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Emulates the Raspberry Pi platforms for the build below.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -46,13 +49,12 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      # linux/amd64 only, by design — see the Dockerfile's own comment:
-      # cgo + libusb makes arm64-via-QEMU cross-builds slow and fragile
-      # for a single-scanner-model tool with no arm64 hardware target.
+      # arm64 and arm/v7 cover Raspberry Pi OS 64- and 32-bit. They build
+      # under QEMU, which is slow (cgo) but needs no cross toolchain.
       - uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

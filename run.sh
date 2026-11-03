@@ -13,10 +13,16 @@ mkdir -p "$DATA_DIR"
 
 docker rm -f doxie-scanner >/dev/null 2>&1 || true
 
+ENV_ARGS=()
+[ -f .env ] && ENV_ARGS=(--env-file .env)
+
 docker run -d \
 	--name doxie-scanner \
+	--restart unless-stopped \
+	"${ENV_ARGS[@]}" \
 	-p "${PORT}:8080" \
 	-v "$(realpath "$DATA_DIR")":/data \
+	-v /etc/localtime:/etc/localtime:ro \
 	-v /dev/bus/usb:/dev/bus/usb \
 	--device-cgroup-rule='c 189:* rmw' \
 	"$IMAGE"
