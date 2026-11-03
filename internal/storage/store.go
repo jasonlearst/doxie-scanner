@@ -2,11 +2,13 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Store persists scan jobs under a single root directory. Every method
@@ -15,7 +17,13 @@ import (
 // rather than fast at a scale this tool will never see.
 type Store struct {
 	root string
+	// mu serializes UpdateMeta's read-modify-write across the web app and
+	// background housekeeping.
+	mu sync.Mutex
 }
+
+// ErrJobNotFound means a job's metadata is missing or unreadable.
+var ErrJobNotFound = errors.New("storage: job not found")
 
 // New returns a Store rooted at root. It does not create or validate the
 // directory — call CheckWritable for that (main.go does this once at
@@ -72,6 +80,25 @@ func (s *Store) SaveMeta(meta JobMeta) error {
 		return fmt.Errorf("storage: write metadata for job %q: %w", meta.ID, err)
 	}
 	return nil
+}
+
+// UpdateMeta loads a job's metadata, lets change edit it, and saves the
+// result, all under one lock. A non-nil error from change aborts the
+// update and is returned as is.
+func (s *Store) UpdateMeta(id string, change func(*JobMeta) error) (JobMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	meta, err := s.LoadMeta(id)
+	if err != nil {
+		return JobMeta{}, fmt.Errorf("%w: %v", ErrJobNotFound, err)
+	}
+	if err := change(&meta); err != nil {
+		return JobMeta{}, err
+	}
+	if err := s.SaveMeta(meta); err != nil {
+		return JobMeta{}, err
+	}
+	return meta, nil
 }
 
 // LoadMeta reads a job's meta.json.
@@ -194,6 +221,9 @@ func (s *Store) DeleteJob(id string) error {
 type AppSettings struct {
 	// ButtonScan is what the scanner's own scan button does.
 	ButtonScan ScanSettings `json:"buttonScan"`
+	// RetentionDays is how long a scan stays after Paperless has filed
+	// every page of it; 0 keeps scans forever, nil means the default.
+	RetentionDays *int `json:"retentionDays,omitempty"`
 }
 
 func (s *Store) settingsPath() string { return filepath.Join(s.root, "settings.json") }

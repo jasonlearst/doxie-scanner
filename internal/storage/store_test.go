@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -403,5 +404,39 @@ func TestStore_Settings(t *testing.T) {
 	}
 	if err := s.SaveSettings(want); err == nil {
 		t.Error("unwritable settings should fail to save")
+	}
+}
+
+func TestStore_UpdateMeta(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.CreateJob(JobMeta{ID: "job1", Name: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.UpdateMeta("job1", func(m *JobMeta) error { m.Name = "b"; return nil })
+	if err != nil || got.Name != "b" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if saved, _ := s.LoadMeta("job1"); saved.Name != "b" {
+		t.Error("the change should be saved")
+	}
+
+	stop := errors.New("rejected")
+	if _, err := s.UpdateMeta("job1", func(m *JobMeta) error { m.Name = "c"; return stop }); !errors.Is(err, stop) {
+		t.Errorf("a rejected change returns its error, got %v", err)
+	}
+	if saved, _ := s.LoadMeta("job1"); saved.Name != "b" {
+		t.Error("a rejected change must not be saved")
+	}
+	if _, err := s.UpdateMeta("nope", func(*JobMeta) error { return nil }); !errors.Is(err, ErrJobNotFound) {
+		t.Errorf("unknown job: got %v", err)
+	}
+
+	metaPath := filepath.Join(s.Root(), "jobs", "job1", "meta.json")
+	if err := os.Chmod(metaPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(metaPath, 0o644) })
+	if _, err := s.UpdateMeta("job1", func(*JobMeta) error { return nil }); err == nil {
+		t.Error("a failed save should surface")
 	}
 }
