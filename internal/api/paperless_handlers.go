@@ -139,7 +139,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return 0, ""
 	})
 	if ok {
-		writeJSON(w, http.StatusOK, toDetail(updated))
+		writeJSON(w, http.StatusOK, s.toDetail(updated))
 	}
 }
 
@@ -148,36 +148,14 @@ func (s *Server) handleRefreshSent(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePaperless(w) {
 		return
 	}
-	meta, err := s.store.LoadMeta(r.PathValue("id"))
+	meta, err := s.keeper.RefreshSent(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found")
-		return
-	}
-	updates := map[string]paperless.Task{}
-	for _, sent := range meta.Sent {
-		if sent.TaskID == "" || sent.Status == paperless.TaskDone || sent.Status == paperless.TaskFailed {
-			continue
-		}
-		task, err := s.paperless.Task(r.Context(), sent.TaskID)
-		if err != nil {
-			paperlessError(w, err)
+		if _, loadErr := s.store.LoadMeta(r.PathValue("id")); loadErr != nil {
+			writeError(w, http.StatusNotFound, "not_found", "job not found")
 			return
 		}
-		updates[sent.TaskID] = task
+		paperlessError(w, err)
+		return
 	}
-
-	updated, ok := s.mutateJob(w, r, func(m *storage.JobMeta) (int, string) {
-		for i, sent := range m.Sent {
-			if task, found := updates[sent.TaskID]; found {
-				m.Sent[i].Status, m.Sent[i].DocumentID = task.Status, task.DocumentID
-				if task.Status == paperless.TaskFailed {
-					m.Sent[i].Error = task.Message
-				}
-			}
-		}
-		return 0, ""
-	})
-	if ok {
-		writeJSON(w, http.StatusOK, toDetail(updated))
-	}
+	writeJSON(w, http.StatusOK, s.toDetail(meta))
 }

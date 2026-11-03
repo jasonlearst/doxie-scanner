@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -237,5 +238,67 @@ func TestErrorCode(t *testing.T) {
 		if got := errorCode(status); got != want {
 			t.Errorf("%d: got %q", status, got)
 		}
+	}
+}
+
+func TestUpdateScan_Splits(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f"}, seedPage{id: "001b"}, seedPage{id: "002f"})
+
+	rec := do(srv, http.MethodPatch, "/api/scans/job1", map[string]any{"splits": []string{"002f", "001b", "002f"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d %s", rec.Code, rec.Body)
+	}
+	meta, _ := store.LoadMeta("job1")
+	if fmt.Sprint(meta.Splits) != "[002f 001b]" || meta.Name != "Scan job1" {
+		t.Errorf("splits are deduplicated and the name left alone: %v %q", meta.Splits, meta.Name)
+	}
+	if rec := do(srv, http.MethodPatch, "/api/scans/job1", map[string]any{"splits": []string{"zzz"}}); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown page: %d", rec.Code)
+	}
+
+	if rec := do(srv, http.MethodDelete, "/api/scans/job1/pages/001b", nil); rec.Code != http.StatusNoContent {
+		t.Fatal(rec.Code)
+	}
+	meta, _ = store.LoadMeta("job1")
+	if fmt.Sprint(meta.Splits) != "[002f]" {
+		t.Errorf("deleting a page drops its split: %v", meta.Splits)
+	}
+
+	do(srv, http.MethodPatch, "/api/scans/job1", map[string]any{"splits": []string{}})
+	if meta, _ = store.LoadMeta("job1"); len(meta.Splits) != 0 {
+		t.Errorf("an empty list clears splits: %v", meta.Splits)
+	}
+}
+
+func TestListScans_SentCountsAndError(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	meta := seedJob(t, store, "job1", seedPage{id: "001f"})
+	meta.Error = "paper jam"
+	meta.Sent = []storage.SentDocument{{Status: "done"}, {Status: "failed"}, {Status: "queued"}}
+	if err := store.SaveMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	got := decode[[]jobSummary](t, do(srv, http.MethodGet, "/api/scans", nil))[0]
+	if got.Sent != (sentCounts{Total: 3, Done: 1, Failed: 1}) || got.Error != "paper jam" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestGetScan_ReportsWhenItWillBeRemoved(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	meta := seedJob(t, store, "job1", seedPage{id: "001f"})
+	filed := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	meta.Sent = []storage.SentDocument{{Status: "done", Pages: []string{"001f"}, SentAt: filed, FiledAt: &filed}}
+	if err := store.SaveMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	got := decode[jobDetailResponse](t, do(srv, http.MethodGet, "/api/scans/job1", nil))
+	if got.RemoveAt == nil || !got.RemoveAt.Equal(filed.Add(7*24*time.Hour)) {
+		t.Errorf("removeAt %v", got.RemoveAt)
+	}
+	seedJob(t, store, "job2", seedPage{id: "001f"})
+	if got := decode[jobDetailResponse](t, do(srv, http.MethodGet, "/api/scans/job2", nil)); got.RemoveAt != nil {
+		t.Error("a scan not yet filed has no removal date")
 	}
 }

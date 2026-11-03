@@ -3,10 +3,10 @@ package api
 import (
 	"io/fs"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
+	"github.com/andiapps-dev/doxie-scanner/internal/housekeeping"
 	"github.com/andiapps-dev/doxie-scanner/internal/paperless"
 	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
@@ -21,8 +21,6 @@ type Server struct {
 	version string
 	mux     *http.ServeMux
 
-	// metaMu serializes read-modify-write of meta.json across requests.
-	metaMu sync.Mutex
 	// renderSlot limits full-size decodes to one at a time: a single
 	// 600 dpi page is ~135 MB decoded, which a 1 GB Raspberry Pi can only
 	// afford once.
@@ -30,6 +28,7 @@ type Server struct {
 
 	paperless *paperless.Client // nil when not configured
 	now       func() time.Time
+	keeper    *housekeeping.Keeper
 }
 
 // Option configures optional integrations.
@@ -47,6 +46,7 @@ func NewServer(drv driver.Driver, jobs *scanjobs.Manager, store *storage.Store, 
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.keeper = &housekeeping.Keeper{Store: store, Paperless: s.paperless, Scanning: s.isScanning, Now: func() time.Time { return s.now() }}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/version", s.handleVersion)
@@ -58,7 +58,7 @@ func NewServer(drv driver.Driver, jobs *scanjobs.Manager, store *storage.Store, 
 	mux.HandleFunc("POST /api/scans", s.handleStartScan)
 	mux.HandleFunc("GET /api/scans", s.handleListScans)
 	mux.HandleFunc("GET /api/scans/{id}", s.handleGetScan)
-	mux.HandleFunc("PATCH /api/scans/{id}", s.handleRenameScan)
+	mux.HandleFunc("PATCH /api/scans/{id}", s.handleUpdateScan)
 	mux.HandleFunc("DELETE /api/scans/{id}", s.handleDeleteScan)
 	mux.HandleFunc("GET /api/scans/{id}/pdf", s.handleJobPDF)
 	mux.HandleFunc("POST /api/scans/{id}/send", s.handleSend)
@@ -79,6 +79,10 @@ func NewServer(drv driver.Driver, jobs *scanjobs.Manager, store *storage.Store, 
 	s.mux = mux
 	return s
 }
+
+// Housekeeper follows uploads and removes old imported scans; main runs
+// its sweep in the background.
+func (s *Server) Housekeeper() *housekeeping.Keeper { return s.keeper }
 
 // ServeHTTP makes Server itself an http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

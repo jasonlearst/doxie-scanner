@@ -62,15 +62,17 @@ func Validate(s storage.ScanSettings) error {
 	return nil
 }
 
-// ErrScannerUnavailable means the scanner isn't reachable: unplugged,
-// switched off, or asleep after sitting idle.
-var ErrScannerUnavailable = errors.New("the scanner is asleep or off: press its power button")
+// ErrScannerUnavailable means the scanner isn't reachable: unplugged, or
+// switched off (it turns itself off after a few idle hours).
+var ErrScannerUnavailable = errors.New("the scanner is off: press its power button")
 
 // ErrNoPaper means a scan was asked for with nothing in any feeder.
 var ErrNoPaper = errors.New("load paper into the scanner first")
 
 // DeviceStatus is what the UI shows about the scanner itself.
 type DeviceStatus struct {
+	// Checked is false until Run has first tried the scanner.
+	Checked   bool `json:"checked"`
 	Connected bool `json:"connected"`
 	Scanning  bool `json:"scanning"`
 	Paper     bool `json:"paper"`
@@ -128,7 +130,6 @@ func NewManager(drv driver.Driver, store *storage.Store) *Manager {
 		now:      time.Now,
 		Timings:  DefaultTimings,
 		requests: make(chan scanRequest),
-		device:   DeviceStatus{Err: errors.New("not checked yet")},
 	}
 }
 
@@ -205,11 +206,11 @@ func (m *Manager) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		sess, err := m.drv.Open(ctx)
 		if err != nil {
-			m.setDevice(func(d *DeviceStatus) { *d = DeviceStatus{Err: err} })
+			m.setDevice(func(d *DeviceStatus) { *d = DeviceStatus{Checked: true, Err: err} })
 			m.waitOffline(ctx)
 			continue
 		}
-		m.setDevice(func(d *DeviceStatus) { *d = DeviceStatus{Connected: true} })
+		m.setDevice(func(d *DeviceStatus) { *d = DeviceStatus{Checked: true, Connected: true} })
 		m.serve(ctx, sess)
 		sess.Close()
 		// A session that fails straight away (say, a jam the user hasn't

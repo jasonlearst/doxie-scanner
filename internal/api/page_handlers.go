@@ -43,12 +43,16 @@ func (s *Server) withDecodedPage(jobID string, page storage.PageMeta, use func(i
 }
 
 // handlePageImage serves a page rendered with its edits at a preset size
-// (?size=thumb|preview). The ETag changes exactly when the edits do, so
-// the UI only re-downloads what actually changed.
+// (?size=thumb|preview). ?crop=none leaves the crop out, for the crop
+// tool to show the whole page. The ETag changes exactly when the edits
+// do, so the UI only re-downloads what actually changed.
 func (s *Server) handlePageImage(w http.ResponseWriter, r *http.Request) {
 	meta, page, ok := s.loadPage(w, r)
 	if !ok {
 		return
+	}
+	if r.URL.Query().Get("crop") == "none" {
+		page.Edits.Crop = nil
 	}
 	size := r.URL.Query().Get("size")
 	if size == "" {
@@ -185,6 +189,7 @@ func (s *Server) handleDeletePage(w http.ResponseWriter, r *http.Request) {
 		}
 		removed = page
 		meta.Pages = slices.Delete(meta.Pages, i, i+1)
+		meta.Splits = slices.DeleteFunc(meta.Splits, func(id string) bool { return id == pageID })
 		return 0, ""
 	})
 	if !ok {
@@ -226,6 +231,6 @@ func (s *Server) handleReorderPages(w http.ResponseWriter, r *http.Request) {
 		return 0, ""
 	})
 	if ok {
-		writeJSON(w, http.StatusOK, toDetail(meta))
+		writeJSON(w, http.StatusOK, s.toDetail(meta))
 	}
 }

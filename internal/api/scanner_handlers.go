@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/andiapps-dev/doxie-scanner/internal/housekeeping"
 	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
@@ -20,6 +21,8 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 type scannerStatusResponse struct {
+	// Checking is true until the scanner has been looked for once.
+	Checking  bool      `json:"checking"`
 	Connected bool      `json:"connected"`
 	Busy      bool      `json:"busy"`
 	Paper     bool      `json:"paper"`
@@ -29,7 +32,11 @@ type scannerStatusResponse struct {
 	Error     *apiError `json:"error,omitempty"`
 }
 
-const asleepMessage = "The scanner is asleep or off. Press its power button."
+// The scanner's own sleep (display and power light off) keeps it on USB;
+// it only drops off when it switches itself off or is unplugged.
+const asleepMessage = "The scanner is off. Press its power button to turn it on."
+
+const maxRetentionDays = 3650
 
 // handleScannerStatus reports what the scanner loop last saw. It never
 // touches USB itself, so the UI can poll it freely, even mid-scan. Not
@@ -39,6 +46,7 @@ func (s *Server) handleScannerStatus(w http.ResponseWriter, r *http.Request) {
 	info := s.drv.Info()
 	d := s.jobs.Device()
 	resp := scannerStatusResponse{
+		Checking:  !d.Checked,
 		Connected: d.Connected,
 		Busy:      d.Scanning,
 		Paper:     d.Paper,
@@ -62,8 +70,16 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, withDefaults(settings))
+}
+
+func withDefaults(settings storage.AppSettings) storage.AppSettings {
 	settings.ButtonScan = scanjobs.WithDefaults(settings.ButtonScan)
-	writeJSON(w, http.StatusOK, settings)
+	if settings.RetentionDays == nil {
+		days := housekeeping.DefaultRetentionDays
+		settings.RetentionDays = &days
+	}
+	return settings
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
@@ -72,9 +88,13 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	settings.ButtonScan = scanjobs.WithDefaults(settings.ButtonScan)
+	settings = withDefaults(settings)
 	if err := scanjobs.Validate(settings.ButtonScan); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if *settings.RetentionDays < 0 || *settings.RetentionDays > maxRetentionDays {
+		writeError(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("retentionDays must be between 0 and %d", maxRetentionDays))
 		return
 	}
 	if err := s.store.SaveSettings(settings); err != nil {

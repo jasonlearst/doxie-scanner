@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"image"
 	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
@@ -206,5 +207,25 @@ func TestPageImage_CacheWriteFailureStillServes(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(pages, 0o755) })
 	if rec := do(srv, http.MethodGet, "/api/scans/job1/pages/001f/image?size=thumb", nil); rec.Code != http.StatusOK {
 		t.Errorf("status %d", rec.Code)
+	}
+}
+
+func TestPageImage_UncroppedForTheCropTool(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f", edits: pageimage.Edits{Crop: &pageimage.Crop{X: 0, Y: 0, W: 30, H: 30}}})
+
+	size := func(path string) image.Point {
+		rec := do(srv, http.MethodGet, path, nil)
+		img, err := jpeg.Decode(bytes.NewReader(rec.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		return img.Bounds().Size()
+	}
+	if got := size("/api/scans/job1/pages/001f/image?size=thumb"); got != (image.Point{30, 30}) {
+		t.Errorf("cropped: %v", got)
+	}
+	if got := size("/api/scans/job1/pages/001f/image?size=thumb&crop=none"); got != (image.Point{60, 90}) {
+		t.Errorf("crop=none should show the whole page: %v", got)
 	}
 }

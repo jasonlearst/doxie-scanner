@@ -3,11 +3,16 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
+	"time"
 
+	"github.com/andiapps-dev/doxie-scanner/internal/housekeeping"
 	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
+	"github.com/andiapps-dev/doxie-scanner/internal/paperless"
 	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
@@ -80,6 +85,16 @@ type jobSummary struct {
 	Settings  storage.ScanSettings `json:"settings"`
 	CoverPage string               `json:"coverPage,omitempty"`
 	CoverKey  string               `json:"coverKey,omitempty"`
+	Sent      sentCounts           `json:"sent"`
+	Error     string               `json:"error,omitempty"`
+}
+
+// sentCounts summarize a job's uploads so a list can say whether it still
+// needs review, is waiting on Paperless, or is filed.
+type sentCounts struct {
+	Total  int `json:"total"`
+	Done   int `json:"done"`
+	Failed int `json:"failed"`
 }
 
 func toSummary(j storage.JobMeta) jobSummary {
@@ -91,6 +106,16 @@ func toSummary(j storage.JobMeta) jobSummary {
 		Status:    j.Status,
 		PageCount: len(visible),
 		Settings:  j.Settings,
+		Error:     j.Error,
+	}
+	for _, sent := range j.Sent {
+		sum.Sent.Total++
+		switch sent.Status {
+		case paperless.TaskDone:
+			sum.Sent.Done++
+		case paperless.TaskFailed:
+			sum.Sent.Failed++
+		}
 	}
 	if len(visible) > 0 {
 		sum.CoverPage = visible[0].ID
@@ -124,6 +149,9 @@ type jobDetailResponse struct {
 	storage.JobMeta
 	Pages        []pageResponse `json:"pages"`
 	PagesScanned *int           `json:"pagesScanned,omitempty"`
+	// RemoveAt is when housekeeping will delete this scan, once Paperless
+	// has filed every page of it.
+	RemoveAt *time.Time `json:"removeAt,omitempty"`
 }
 
 func toPageResponse(p storage.PageMeta) pageResponse {
@@ -134,10 +162,14 @@ func toPageResponse(p storage.PageMeta) pageResponse {
 	}
 }
 
-func toDetail(meta storage.JobMeta) jobDetailResponse {
+func (s *Server) toDetail(meta storage.JobMeta) jobDetailResponse {
 	resp := jobDetailResponse{JobMeta: meta, Pages: make([]pageResponse, 0, len(meta.Pages))}
 	for _, p := range meta.Pages {
 		resp.Pages = append(resp.Pages, toPageResponse(p))
+	}
+	settings, _ := s.store.LoadSettings()
+	if due, ok := housekeeping.RemoveAt(meta, housekeeping.RetentionDays(settings)); ok {
+		resp.RemoveAt = &due
 	}
 	return resp
 }
@@ -152,7 +184,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "job not found")
 		return
 	}
-	resp := toDetail(meta)
+	resp := s.toDetail(meta)
 	if current := s.jobs.CurrentJob(); current != nil && current.ID == id && current.Status == storage.StatusRunning {
 		n := current.PagesScanned
 		resp.PagesScanned = &n
@@ -160,26 +192,44 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-type renameRequest struct {
-	Name string `json:"name"`
+// updateScanRequest is a partial update: absent fields are left alone.
+type updateScanRequest struct {
+	Name   *string   `json:"name"`
+	Splits *[]string `json:"splits"`
 }
 
-func (s *Server) handleRenameScan(w http.ResponseWriter, r *http.Request) {
-	var req renameRequest
+func (s *Server) handleUpdateScan(w http.ResponseWriter, r *http.Request) {
+	var req updateScanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "name must not be empty")
-		return
+	var name string
+	if req.Name != nil {
+		if name = strings.TrimSpace(*req.Name); name == "" {
+			writeError(w, http.StatusBadRequest, "bad_request", "name must not be empty")
+			return
+		}
 	}
 	if meta, ok := s.mutateJob(w, r, func(meta *storage.JobMeta) (int, string) {
-		meta.Name = name
+		if req.Name != nil {
+			meta.Name = name
+		}
+		if req.Splits != nil {
+			splits := make([]string, 0, len(*req.Splits))
+			for _, id := range *req.Splits {
+				if _, _, found := meta.FindPage(id); !found {
+					return http.StatusBadRequest, fmt.Sprintf("split at unknown page %q", id)
+				}
+				if !slices.Contains(splits, id) {
+					splits = append(splits, id)
+				}
+			}
+			meta.Splits = splits
+		}
 		return 0, ""
 	}); ok {
-		writeJSON(w, http.StatusOK, toDetail(meta))
+		writeJSON(w, http.StatusOK, s.toDetail(meta))
 	}
 }
 
@@ -216,24 +266,31 @@ func (s *Server) mutateJob(w http.ResponseWriter, r *http.Request, change func(*
 		writeError(w, http.StatusConflict, "scan_running", "this job is still scanning")
 		return storage.JobMeta{}, false
 	}
-
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
-	meta, err := s.store.LoadMeta(id)
-	if err != nil {
+	meta, err := s.store.UpdateMeta(id, func(m *storage.JobMeta) error {
+		if status, msg := change(m); status != 0 {
+			return rejection{status, msg}
+		}
+		return nil
+	})
+	var rej rejection
+	switch {
+	case errors.As(err, &rej):
+		writeError(w, rej.status, errorCode(rej.status), rej.msg)
+	case errors.Is(err, storage.ErrJobNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "job not found")
-		return storage.JobMeta{}, false
-	}
-	if status, msg := change(&meta); status != 0 {
-		writeError(w, status, errorCode(status), msg)
-		return storage.JobMeta{}, false
-	}
-	if err := s.store.SaveMeta(meta); err != nil {
+	case err != nil:
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return storage.JobMeta{}, false
 	}
-	return meta, true
+	return meta, err == nil
 }
+
+// rejection carries a handler's refusal out of an UpdateMeta change.
+type rejection struct {
+	status int
+	msg    string
+}
+
+func (r rejection) Error() string { return r.msg }
 
 func errorCode(status int) string {
 	switch status {

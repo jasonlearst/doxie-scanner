@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/api"
 	_ "github.com/andiapps-dev/doxie-scanner/internal/doxiedx400" // registers the "doxie-dx400" driver
@@ -58,6 +59,7 @@ func main() {
 		log.Printf("sending to Paperless at %s", cfg.PaperlessURL)
 	}
 	srv := api.NewServer(drv, mgr, store, web.FS(), version, opts...)
+	go srv.Housekeeper().Run(context.Background(), time.Hour)
 
 	log.Printf("doxie-scanner %s listening on %s (driver=%s)", version, cfg.ListenAddr, cfg.DriverName)
 	log.Fatal(http.ListenAndServe(cfg.ListenAddr, srv))

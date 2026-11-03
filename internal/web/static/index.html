@@ -1,147 +1,58 @@
 <!doctype html>
-<html lang="en" data-bs-theme="light">
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title data-i18n="nav.title">Doxie Scanner</title>
-  <link rel="stylesheet" href="vendor/bootstrap.min.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Scanner">
+  <title>Scanner</title>
   <link rel="stylesheet" href="vendor/cropper.min.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <nav class="navbar navbar-expand navbar-dark bg-primary mb-4">
-    <div class="container">
-      <span class="navbar-brand mb-0 h1" data-i18n="nav.title">Doxie Scanner</span>
-      <span id="scanner-badge" class="badge rounded-pill text-bg-secondary" data-i18n="nav.checking">checking…</span>
-      <select id="lang-switcher" class="form-select form-select-sm ms-2" style="width:auto">
-        <option value="en">English</option>
-        <option value="es">Español</option>
-      </select>
-    </div>
-  </nav>
+  <!-- Icons: Feather (MIT, feathericons.com) paths, plus an authored scan glyph. -->
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 9h8M8 12h8M8 15h5"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68 1.65 1.65 0 0 0 10 3.17V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+    <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+    <symbol id="i-crop" viewBox="0 0 24 24"><path d="M6.13 1 6 16a2 2 0 0 0 2 2h15"/><path d="M1 6.13 16 6a2 2 0 0 1 2 2v15"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24M1 1l22 22"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-scissors" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"/></symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></symbol>
+    <symbol id="i-power" viewBox="0 0 24 24"><path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></symbol>
+  </svg>
 
-  <main class="container pb-5">
-    <div class="row g-4">
-      <div class="col-12">
-        <div class="card">
-          <div class="card-body">
-            <h2 class="h5 card-title" data-i18n="scan.newHeading">New scan</h2>
-            <div class="d-flex align-items-center gap-3 flex-wrap">
-              <div class="form-check form-switch mb-0">
-                <input class="form-check-input" type="checkbox" id="duplex-toggle" checked>
-                <label class="form-check-label" for="duplex-toggle" data-i18n="scan.duplexLabel">Duplex (both sides)</label>
-              </div>
-              <button id="start-scan-btn" type="button" class="btn btn-primary" disabled data-i18n="scan.startButton" data-i18n-title="scan.waitingTitle" title="Waiting for scanner connection…">Start scan</button>
-              <div id="scan-progress" class="text-muted small d-none"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="col-12 col-lg-4">
-        <div class="card">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <span data-i18n="jobs.heading">Scans</span>
-          </div>
-          <div id="job-list" class="list-group list-group-flush"></div>
-        </div>
-      </div>
-
-      <div class="col-12 col-lg-8">
-        <div id="job-detail-empty" class="text-muted" data-i18n="jobs.selectPrompt">Select a scan to view its pages.</div>
-        <div id="job-detail" class="d-none">
-          <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-            <div class="d-flex align-items-center gap-2">
-              <input id="job-name-input" type="text" class="form-control form-control-sm" style="width:auto">
-              <button id="job-rename-btn" class="btn btn-sm btn-outline-secondary" data-i18n="jobDetail.rename">Rename</button>
-            </div>
-            <div class="d-flex gap-2 align-items-center">
-              <select id="job-export-format" class="form-select form-select-sm" style="width:auto" data-i18n-title="jobDetail.exportFormatTitle" title="Image format for the exported PDF">
-                <option value="jpeg" selected data-i18n="common.formatJpeg">JPEG (smaller)</option>
-                <option value="png" data-i18n="common.formatPng">PNG (lossless)</option>
-              </select>
-              <button id="job-export-pdf-btn" class="btn btn-sm btn-outline-success" data-i18n="jobDetail.exportPdf">Export scan as PDF</button>
-              <button id="job-delete-btn" class="btn btn-sm btn-outline-danger" data-i18n="jobDetail.deleteScan">Delete scan</button>
-            </div>
-          </div>
-          <p class="text-muted small mb-2" data-i18n="jobDetail.help">Duplex scans number each side as its own page. Drag a thumbnail to reorder it. Click a thumbnail to view, rotate, crop, export, or delete it.</p>
-          <div id="page-grid"></div>
-        </div>
-      </div>
-    </div>
-  </main>
-
-  <div id="combine-bar" class="d-none">
-    <div class="container py-2">
-      <div id="combine-thumbs" class="d-flex align-items-start gap-2 mb-2"></div>
-      <div class="d-flex align-items-center gap-3 flex-wrap">
-        <span id="combine-count-text"></span>
-        <input id="combine-title" type="text" class="form-control form-control-sm" style="width:auto" data-i18n-placeholder="combine.titlePlaceholder" placeholder="Document title">
-        <select id="combine-format" class="form-select form-select-sm" style="width:auto" data-i18n-title="combine.formatTitle" title="Image format for the combined PDF">
-          <option value="jpeg" selected data-i18n="common.formatJpeg">JPEG (smaller)</option>
-          <option value="png" data-i18n="common.formatPng">PNG (lossless)</option>
-        </select>
-        <button id="combine-btn" class="btn btn-success btn-sm" data-i18n="combine.button">Combine into PDF</button>
-        <button id="combine-clear-btn" class="btn btn-outline-secondary btn-sm" data-i18n="combine.clear">Clear selection</button>
-      </div>
-    </div>
+  <div class="app">
+    <nav class="tabbar" aria-label="Main">
+      <a href="#/" data-tab="home"><svg class="icon"><use href="#i-scan"/></svg><span>Scan</span></a>
+      <a href="#/scans" data-tab="scans"><svg class="icon"><use href="#i-layers"/></svg><span>Scans</span></a>
+      <a href="#/settings" data-tab="settings"><svg class="icon"><use href="#i-gear"/></svg><span>Settings</span></a>
+    </nav>
+    <main id="view" tabindex="-1"></main>
   </div>
 
-  <div class="modal fade" id="page-modal" tabindex="-1">
-    <div class="modal-dialog modal-xl modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title" id="page-modal-title">Page</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-        </div>
-        <div class="modal-body text-center">
-          <div class="page-modal-image-wrap" id="page-modal-image-wrap">
-            <img id="page-modal-image" src="" data-i18n-alt="modal.imageAlt" alt="Page">
-          </div>
-          <div class="page-modal-ocr-wrap d-none" id="page-modal-ocr-wrap">
-            <textarea id="pm-ocr-text" class="form-control" readonly></textarea>
-            <p class="text-muted small mb-0 mt-1" id="pm-ocr-hint"></p>
-          </div>
-        </div>
-        <div class="modal-footer flex-wrap justify-content-center gap-2" id="page-modal-view-actions">
-          <div class="btn-group">
-            <button type="button" class="btn btn-outline-secondary" id="pm-rotate-left" data-i18n="modal.rotateLeft" data-i18n-title="modal.rotateLeftTitle" title="Rotate left 90°">⟲ Rotate Left</button>
-            <button type="button" class="btn btn-outline-secondary" id="pm-rotate-right" data-i18n="modal.rotateRight" data-i18n-title="modal.rotateRightTitle" title="Rotate right 90°">⟳ Rotate Right</button>
-          </div>
-          <button type="button" class="btn btn-outline-secondary" id="pm-crop-start" data-i18n="modal.crop">Crop</button>
-          <button type="button" class="btn btn-outline-secondary" id="pm-extract-text" data-i18n="modal.extractText">Extract Text</button>
-          <input type="checkbox" class="btn-check" id="pm-combine-check" autocomplete="off">
-          <label class="btn btn-outline-secondary" for="pm-combine-check" data-i18n="modal.selectForCombine">Select for combine</label>
-          <div class="dropdown">
-            <button type="button" class="btn btn-outline-primary dropdown-toggle" data-bs-toggle="dropdown" data-i18n="modal.export">Export</button>
-            <ul class="dropdown-menu">
-              <li><a class="dropdown-item pm-export-link" href="#" data-format="png" data-i18n="common.formatPng">PNG (lossless)</a></li>
-              <li><a class="dropdown-item pm-export-link" href="#" data-format="jpg" data-quality="100" data-i18n="common.formatJpegHigh">JPEG (high quality)</a></li>
-              <li><a class="dropdown-item pm-export-link" href="#" data-format="jpg" data-quality="90" data-i18n="common.formatJpeg">JPEG (smaller)</a></li>
-              <li><a class="dropdown-item pm-export-link" href="#" data-format="pdf" data-i18n="common.formatPdf">PDF</a></li>
-            </ul>
-          </div>
-          <button type="button" class="btn btn-outline-danger" id="pm-delete" data-i18n="modal.deletePage">Delete page</button>
-        </div>
-        <div class="modal-footer d-none justify-content-center gap-2" id="page-modal-crop-actions">
-          <button type="button" class="btn btn-secondary" id="pm-crop-cancel" data-i18n="modal.cropCancel">Cancel</button>
-          <button type="button" class="btn btn-primary" id="pm-crop-save" data-i18n="modal.cropSave">Save crop</button>
-        </div>
-        <div class="modal-footer d-none justify-content-center gap-2" id="page-modal-ocr-actions">
-          <button type="button" class="btn btn-secondary" id="pm-ocr-back" data-i18n="modal.ocrBack">Back</button>
-          <button type="button" class="btn btn-primary" id="pm-ocr-copy" data-i18n="modal.ocrCopy">Copy text</button>
-        </div>
-      </div>
-    </div>
-  </div>
+  <div id="layer"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
 
-  <div id="busy-overlay" class="d-none">
-    <div class="spinner-border text-light" role="status"><span class="visually-hidden" data-i18n="busy.working">Working…</span></div>
-  </div>
-
-  <script src="vendor/bootstrap.bundle.min.js"></script>
   <script src="vendor/cropper.min.js"></script>
-  <script src="i18n.js"></script>
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

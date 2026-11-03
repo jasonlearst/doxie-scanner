@@ -50,7 +50,7 @@ func TestScannerStatus_Unreachable(t *testing.T) {
 	}
 	for name, c := range cases {
 		srv, _ := newTestServer(t, &fakeDriver{openErr: c.err})
-		waitFor(t, name, func() bool { return status(t, srv).Error != nil })
+		waitFor(t, name, func() bool { e := status(t, srv).Error; return e != nil && e.Code == c.code })
 		resp := status(t, srv)
 		if resp.Connected || resp.Error.Code != c.code {
 			t.Errorf("%s: got %+v", name, resp)
@@ -106,5 +106,32 @@ func TestSettings_StorageFailures(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(path, 0o644) })
 	if rec := do(srv, http.MethodPut, "/api/settings", map[string]any{}); rec.Code != http.StatusInternalServerError {
 		t.Errorf("unwritable settings: status %d", rec.Code)
+	}
+}
+
+func TestSettings_Retention(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	got := decode[storage.AppSettings](t, do(srv, http.MethodGet, "/api/settings", nil))
+	if got.RetentionDays == nil || *got.RetentionDays != 7 {
+		t.Errorf("default retention should read as 7 days, got %v", got.RetentionDays)
+	}
+	if rec := do(srv, http.MethodPut, "/api/settings", map[string]any{"retentionDays": 0}); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if saved, _ := store.LoadSettings(); saved.RetentionDays == nil || *saved.RetentionDays != 0 {
+		t.Errorf("0 (keep forever) must be stored explicitly, got %v", saved.RetentionDays)
+	}
+	for _, bad := range []int{-1, 4000} {
+		if rec := do(srv, http.MethodPut, "/api/settings", map[string]any{"retentionDays": bad}); rec.Code != http.StatusBadRequest {
+			t.Errorf("%d days: status %d", bad, rec.Code)
+		}
+	}
+}
+
+func TestScannerStatus_CheckingUntilFirstLook(t *testing.T) {
+	store := storage.New(t.TempDir())
+	srv := NewServer(&fakeDriver{}, scanjobs.NewManager(&fakeDriver{}, store), store, nil, "test")
+	if resp := status(t, srv); !resp.Checking || resp.Connected || resp.Error != nil {
+		t.Errorf("before the scanner has been looked for, status is checking with no error, got %+v", resp)
 	}
 }
