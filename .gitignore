@@ -14,3 +14,7 @@ coverage.html
 .impeccable/mocks/
 .impeccable/hook.cache.json
 .impeccable/config.local.json
+
+# Claude Code's task worktrees and personal settings
+.claude/worktrees/
+.claude/settings.local.json
