@@ -5,6 +5,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/) — tags look
 like `v1.2.0`, and each one gets its own section below.
 
+## [2.0.2] - 2026-11-03
+
+### Fixed
+
+- Scanning a stack still stopped after the first sheet in 2.0.1, and
+  the next sheet was left half fed in the scanner. A USB capture of
+  Doxie's own driver showed that it keeps the scan job open for the
+  whole stack and repeats only a short setup before each sheet; this
+  app ended and restarted the job around every sheet. It now follows
+  Doxie's sequence, and a four-sheet stack scans straight through.
+
 ## [2.0.1] - 2026-11-03
 
 ### Fixed
