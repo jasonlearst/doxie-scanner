@@ -183,7 +183,7 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // list follows every page of a list endpoint.
 func (c *Client) list(ctx context.Context, path string) ([]Item, error) {
-	var all []Item
+	all := []Item{} // an empty list, not null, so the app can always loop over it
 	next := path + "?page_size=500&ordering=name"
 	for next != "" {
 		var page struct {
