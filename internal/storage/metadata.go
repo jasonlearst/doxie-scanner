@@ -48,6 +48,9 @@ type PageMeta struct {
 	Blank    bool            `json:"blank,omitempty"`
 	Hidden   bool            `json:"hidden,omitempty"`
 	Edits    pageimage.Edits `json:"edits"`
+	// Paper is where the sheet was found, kept so the crop tool can go back
+	// to it after the person changes the crop.
+	Paper *pageimage.Paper `json:"paper,omitempty"`
 }
 
 // JobMeta is the full persisted record for one scan job, stored as

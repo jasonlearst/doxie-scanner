@@ -916,10 +916,11 @@ function startCrop() {
   const stage = h('div', { class: 'viewer-stage' }, h('div', { class: 'crop-stage' }, img));
   const done = h('button', { type: 'button' }, icon('check'), 'Done');
   const reset = h('button', { type: 'button' }, icon('x'), 'No crop');
+  const auto = h('button', { type: 'button' }, icon('fit'), 'Auto');
   const cancel = h('button', { type: 'button' }, icon('chevron-left'), 'Cancel');
   const el = document.querySelector('.viewer');
   el.querySelector('.viewer-stage').replaceWith(stage);
-  el.querySelector('.toolbar').replaceChildren(cancel, reset, done);
+  el.querySelector('.toolbar').replaceChildren(cancel, reset, auto, done);
   viewer.mode = 'crop';
 
   img.addEventListener('load', () => {
@@ -936,7 +937,10 @@ function startCrop() {
 
   const leave = () => { viewer.cropper && viewer.cropper.destroy(); viewer.cropper = null; viewer.mode = 'view'; drawViewer(); };
   cancel.addEventListener('click', leave);
-  reset.addEventListener('click', async () => { viewer.mode = 'view'; viewer.cropper && viewer.cropper.destroy(); viewer.cropper = null; await editPage({ crop: null }); });
+  const apply = async (patch) => { viewer.mode = 'view'; viewer.cropper && viewer.cropper.destroy(); viewer.cropper = null; if (!await editPage(patch)) drawViewer(); };
+  // No crop shows the page exactly as scanned; Auto goes back to the sheet's edges.
+  reset.addEventListener('click', () => apply({ crop: null, straighten: 0 }));
+  auto.addEventListener('click', () => apply({ autoCrop: true }));
   done.addEventListener('click', async () => {
     if (!viewer.cropper) return;
     const d = viewer.cropper.getData(true);

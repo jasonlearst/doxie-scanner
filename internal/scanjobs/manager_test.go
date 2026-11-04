@@ -194,6 +194,36 @@ func TestScan_AutoSidesHidesBlankBacksButKeepsThem(t *testing.T) {
 	}
 }
 
+// narrowSheet is a sheet narrower than the scanner, on its gray backing.
+func narrowSheet(printed bool) *image.NRGBA {
+	img := page(color.NRGBA{176, 178, 177, 255}, 600, 800)
+	draw.Draw(img, image.Rect(60, 0, 540, 800), &image.Uniform{color.White}, image.Point{}, draw.Src)
+	if printed {
+		for y := 60; y < 740; y += 20 {
+			draw.Draw(img, image.Rect(100, y, 500, y+6), image.Black, image.Point{}, draw.Src)
+		}
+	}
+	return img
+}
+
+func TestScan_CropsToTheSheetAndHidesItsBlankBack(t *testing.T) {
+	back := side(t, narrowSheet(false))
+	_, meta, _ := scan(t, storage.ScanSettings{Sides: SidesAuto}, sheet(side(t, narrowSheet(true)), &back))
+
+	for _, p := range meta.Pages {
+		c := p.Edits.Crop
+		if p.Paper == nil || c == nil || c.X < 58 || c.X > 66 || c.X+c.W < 534 || c.X+c.W > 542 {
+			t.Errorf("%s: paper %+v crop %+v, want the sheet at x 60..540", p.ID, p.Paper, c)
+		}
+	}
+	if b := meta.Pages[1]; !b.Blank || !b.Hidden {
+		t.Errorf("a blank back beside the backing should be hidden: blank=%v hidden=%v", b.Blank, b.Hidden)
+	}
+	if f := meta.Pages[0]; f.Blank {
+		t.Error("the printed front is not blank")
+	}
+}
+
 func TestScan_ColorModes(t *testing.T) {
 	red := page(color.White, 300, 400)
 	draw.Draw(red, image.Rect(50, 50, 250, 250), &image.Uniform{color.RGBA{220, 20, 20, 255}}, image.Point{}, draw.Src)
