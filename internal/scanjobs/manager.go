@@ -355,6 +355,9 @@ func (m *Manager) run(ctx context.Context, sess driver.Session, meta storage.Job
 	go func() { processed <- m.processSheets(&meta, sheets, stop) }()
 
 	err := feed(ctx, sess, opts, sheets, stop)
+	if endErr := sess.EndBatch(ctx); err == nil {
+		err = endErr
+	}
 	close(sheets)
 	if procErr := <-processed; err == nil {
 		err = procErr

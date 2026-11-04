@@ -33,6 +33,9 @@ type fakeSession struct {
 	onHasNext func(n int)
 	onScan    func(n int)
 	hasNexts  int
+
+	endBatchErr error
+	endBatches  int
 }
 
 func (s *fakeSession) HasNextPage(ctx context.Context) (bool, error) {
@@ -72,6 +75,19 @@ func (s *fakeSession) ScanPage(ctx context.Context, opts driver.ScanOptions) (dr
 		return driver.Page{}, errors.New("fakeSession: ScanPage called with no page scripted")
 	}
 	return s.pages[s.idx-1], nil
+}
+
+func (s *fakeSession) EndBatch(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.endBatches++
+	return s.endBatchErr
+}
+
+func (s *fakeSession) batchesEnded() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endBatches
 }
 
 // fed is how many sheets ScanPage has been asked for.

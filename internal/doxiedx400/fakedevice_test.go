@@ -96,9 +96,9 @@ type scriptedSide struct {
 	lines int
 }
 
-// scriptSheet queues the full exchange for one sheet whose sides each
-// fit in a single chunk.
-func (f *fakeDevice) scriptSheet(duplex bool, sides ...scriptedSide) {
+// scriptFirstSheet queues the first sheet of a stack, whose sides each
+// fit in a single chunk: the job reserve and full setup, then the sheet.
+func (f *fakeDevice) scriptFirstSheet(duplex bool, sides ...scriptedSide) {
 	f.ok(nil)             // E6 job
 	f.ok(make([]byte, 5)) // A8 A0
 	f.ok(nil)             // E4 window
@@ -112,12 +112,34 @@ func (f *fakeDevice) scriptSheet(duplex bool, sides ...scriptedSide) {
 	f.ok(nil) // gamma 0
 	f.ok(nil) // gamma 1
 	f.ok(nil) // gamma 2
+	f.scriptSides(sides...)
+}
+
+// scriptNextSheet queues a later sheet of the same stack: the shorter
+// setup, then the sheet.
+func (f *fakeDevice) scriptNextSheet(sides ...scriptedSide) {
+	f.ok(nil)                // E4 window
+	f.ok(nil)                // AA 95
+	f.ok(nil)                // AA 96
+	f.ok(make([]byte, 0x24)) // A8 60
+	f.scriptSides(sides...)
+}
+
+func (f *fakeDevice) scriptSides(sides ...scriptedSide) {
 	f.ok(nil) // E6 scan unit
 	for _, s := range sides {
 		f.checkCondition(s.data, endOfSide(s.data, s.lines))
 	}
 	f.ok(nil) // E7 scan unit
-	f.ok(nil) // E7 job
+}
+
+// paper queues the reply to one paper check.
+func (f *fakeDevice) paper(present bool) {
+	reply := []byte{0x00, 0x00, 0x02, 0x05, 0x00}
+	if present {
+		reply[4] = 0x01
+	}
+	f.ok(reply)
 }
 
 func fixture(t *testing.T, name string) []byte {

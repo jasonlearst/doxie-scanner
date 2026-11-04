@@ -59,6 +59,9 @@ type Session interface {
 	// ScanPage scans the next sheet. Callers must have confirmed
 	// HasNextPage first.
 	ScanPage(ctx context.Context, opts ScanOptions) (Page, error)
+	// EndBatch tells the driver that no more sheets will be scanned in
+	// this batch, because the feeder is empty or the caller stopped early.
+	EndBatch(ctx context.Context) error
 	// WaitForButton waits up to timeout for the scanner's own scan button
 	// and reports whether it was pressed.
 	WaitForButton(ctx context.Context, timeout time.Duration) (bool, error)
