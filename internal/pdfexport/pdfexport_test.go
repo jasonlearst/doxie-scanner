@@ -2,6 +2,7 @@ package pdfexport
 
 import (
 	"bytes"
+	"compress/zlib"
 	"errors"
 	"image"
 	"image/color"
@@ -129,5 +130,72 @@ func TestBilevel(t *testing.T) {
 	g.Pix[3] = 128
 	if bilevel(g) || bilevel(solid(2, 2, color.White)) {
 		t.Error("mid-tones or non-gray images are not bilevel")
+	}
+}
+
+func TestBuild_BlackAndWhiteIsOneBit(t *testing.T) {
+	page, err := FromImage(bwPage(200, 200), 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pdf, err := Build([]Page{page})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(pdf, []byte("/BitsPerComponent 1")) {
+		t.Error("a black & white page should be stored at one bit per pixel")
+	}
+}
+
+func TestBuild_PlacedJPEGIsUntouchedAndPlacedByTheTransform(t *testing.T) {
+	jpg := scannedJPEG(t) // 85 x 110 px
+	// Show 50 x 60 px from (10, 20), at 10 px to the inch.
+	place := Placement{W: 85, H: 110, Map: Affine{A: 0.1, D: 0.1, E: -1, F: -2}}
+	pdf, err := Build([]Page{PlacedJPEG(jpg, 5, 6, place)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(pdf, jpg) {
+		t.Error("a placed page must embed the scan byte for byte")
+	}
+	if !bytes.Contains(pdf, []byte("/MediaBox [0 0 360.00 432.00]")) {
+		t.Error("the page should be the 5x6in window")
+	}
+	// 85 px wide at 7.2 pt each; the image's bottom edge 110-20 = 90 px
+	// below the page's top, which is 432pt up: 432 - 90*7.2 = -216.
+	if want := "612.00000 0.00000 0.00000 792.00000 -72.00000 -216.00000 cm"; !bytes.Contains(contentStreams(t, pdf), []byte(want)) {
+		t.Errorf("missing the placement %q", want)
+	}
+}
+
+// contentStreams inflates every compressed stream in a PDF.
+func contentStreams(t *testing.T, pdf []byte) []byte {
+	t.Helper()
+	var out []byte
+	for rest := pdf; ; {
+		start := bytes.Index(rest, []byte("stream\n"))
+		if start < 0 {
+			return out
+		}
+		rest = rest[start+len("stream\n"):]
+		end := bytes.Index(rest, []byte("endstream"))
+		if end < 0 {
+			return out
+		}
+		if r, err := zlib.NewReader(bytes.NewReader(rest[:end])); err == nil {
+			data, _ := io.ReadAll(r)
+			out = append(out, data...)
+		}
+		rest = rest[end:]
+	}
+}
+
+func TestPlacedImage(t *testing.T) {
+	page, err := PlacedImage(bwPage(20, 20), 1, 1, Placement{W: 20, H: 20, Map: Affine{A: 0.05, D: 0.05}})
+	if err != nil || page.Place == nil || page.Format != "PNG" {
+		t.Fatalf("got %+v, %v", page, err)
+	}
+	if _, err := Build([]Page{page}); err != nil {
+		t.Fatal(err)
 	}
 }

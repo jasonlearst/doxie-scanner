@@ -1,44 +1,78 @@
 package api
 
 import (
+	"bytes"
 	"fmt"
 	"image"
+	"image/jpeg"
 	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/disintegration/imaging"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 	"github.com/andiapps-dev/doxie-scanner/internal/pdfexport"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
 
-// buildPDF assembles pages into a PDF at their physical size. Unedited
-// pages carry the scanner's JPEG byte for byte; edited ones are rendered
-// and encoded one at a time so memory stays flat on a Raspberry Pi.
+// buildPDF assembles pages into a PDF at their physical size, one page at
+// a time so memory stays flat on a Raspberry Pi.
 func (s *Server) buildPDF(jobID string, pages []storage.PageMeta) ([]byte, error) {
 	out := make([]pdfexport.Page, 0, len(pages))
 	for _, p := range pages {
-		dpi := float64(p.YDPI)
-		if p.Edits.IsIdentity() {
-			original, err := s.store.LoadPageFile(jobID, p.File)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, pdfexport.FromJPEG(original, float64(p.WidthPx)/dpi, float64(p.HeightPx)/dpi))
-			continue
-		}
-		err := s.withDecodedPage(jobID, p, func(img image.Image) error {
-			rendered := pageimage.Render(img, p.Edits)
-			b := rendered.Bounds()
-			page, err := pdfexport.FromImage(rendered, float64(b.Dx())/dpi, float64(b.Dy())/dpi)
-			out = append(out, page)
-			return err
-		})
+		page, err := s.pdfPage(jobID, p)
 		if err != nil {
 			return nil, fmt.Errorf("page %s: %w", p.ID, err)
 		}
+		out = append(out, page)
 	}
 	return pdfexport.Build(out)
+}
+
+// pdfPage leaves cropping, straightening and turning to the PDF. A page
+// whose pixels keep their values goes in as the scanner's JPEG, byte for
+// byte, with no decoding or recompressing. Only tone and color edits
+// redraw pixels, and then just the part of the scan that shows.
+func (s *Server) pdfPage(jobID string, p storage.PageMeta) (pdfexport.Page, error) {
+	dpi := float64(p.YDPI)
+	toInches := pageimage.Scale(1/dpi, 1/dpi)
+	m, outW, outH := pageimage.Geometry(p.Edits, p.WidthPx, p.HeightPx)
+	wIn, hIn := float64(outW)/dpi, float64(outH)/dpi
+
+	if !p.Edits.NeedsPixels() {
+		original, err := s.store.LoadPageFile(jobID, p.File)
+		if err != nil {
+			return pdfexport.Page{}, err
+		}
+		if p.Edits.IsIdentity() {
+			return pdfexport.FromJPEG(original, wIn, hIn), nil
+		}
+		cfg, err := jpeg.DecodeConfig(bytes.NewReader(original))
+		if err != nil {
+			return pdfexport.Page{}, err
+		}
+		// At 200 dpi the scanner's pixels aren't square; Geometry works in
+		// square ones.
+		toSquare := pageimage.Scale(float64(p.WidthPx)/float64(cfg.Width), float64(p.HeightPx)/float64(cfg.Height))
+		return pdfexport.PlacedJPEG(original, wIn, hIn, placement(cfg.Width, cfg.Height, toSquare.Then(m).Then(toInches))), nil
+	}
+
+	var page pdfexport.Page
+	err := s.withDecodedPage(jobID, p, func(img image.Image) error {
+		shown := pageimage.Visible(m, outW, outH, p.WidthPx, p.HeightPx)
+		part := imaging.Crop(img, shown.Add(img.Bounds().Min))
+		tone := pageimage.Edits{Brightness: p.Edits.Brightness, Contrast: p.Edits.Contrast, Color: p.Edits.Color}
+		fromPart := pageimage.Translate(float64(shown.Min.X), float64(shown.Min.Y)).Then(m).Then(toInches)
+		var err error
+		page, err = pdfexport.PlacedImage(pageimage.Render(part, tone), wIn, hIn, placement(shown.Dx(), shown.Dy(), fromPart))
+		return err
+	})
+	return page, err
+}
+
+func placement(w, h int, m pageimage.Affine) pdfexport.Placement {
+	return pdfexport.Placement{W: w, H: h, Map: pdfexport.Affine{A: m.A, B: m.B, C: m.C, D: m.D, E: m.E, F: m.F}}
 }
 
 // selectPages returns the pages named in ids, in that order, or every
