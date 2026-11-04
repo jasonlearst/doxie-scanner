@@ -5,6 +5,41 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/) — tags look
 like `v1.2.0`, and each one gets its own section below.
 
+## [2.1.0] - 2026-11-04
+
+### Added
+
+- Every scan is cropped to the sheet and straightened. The scanner
+  always reads its full width, so a sheet narrower than letter used to
+  come out between gray strips of its backing, and one that fed in
+  crooked came out at an angle. The app now finds where the backing
+  ends, straightens up to 5°, and crops to the paper. Both are ordinary
+  edits, so the scan itself is untouched.
+- The crop tool has Auto, which goes back to the sheet's edges (and
+  finds them for scans made before this release), and No crop now shows
+  the page exactly as scanned, unstraightened.
+
+### Changed
+
+- Send hands the documents to Paperless and closes straight away. The
+  scanner builds and uploads the PDFs in the background, then follows
+  each one until Paperless has filed it, so a scan's status catches up
+  without anyone keeping it open.
+- PDFs crop, straighten and turn pages themselves, so those pages carry
+  the scanner's JPEG unchanged: no quality is lost and no time is spent
+  redrawing them. Black & white pages are stored at one bit per pixel.
+
+### Fixed
+
+- A blank back beside the scanner's backing wasn't hidden, because the
+  gray strips counted as ink.
+- Sent scans stayed at "waiting for Paperless" long after Paperless had
+  filed them.
+- The Send button at the bottom of the send sheet seemed to do nothing
+  while an upload was in progress.
+- The send sheet stayed on "Getting tags and correspondents" when
+  Paperless had no correspondents or document types.
+
 ## [2.0.2] - 2026-11-03
 
 ### Fixed
