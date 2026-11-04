@@ -5,6 +5,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/) — tags look
 like `v1.2.0`, and each one gets its own section below.
 
+## [2.0.1] - 2026-11-03
+
+### Fixed
+
+- Scanning a stack on a Raspberry Pi 3 stopped partway into the second
+  sheet and left it stuck in the scanner. The scanner starts pulling in
+  the next sheet as soon as one ends and gives up if it isn't asked for
+  within a few seconds, and the app was processing each sheet first,
+  which takes several seconds on a Pi. Sheets are now processed while
+  the next one feeds.
+- If a sheet can't be processed, the scan stops after the sheet that is
+  already moving, which is read to the end so it leaves the scanner.
+- A sheet left partway through the scanner is reported in plain words,
+  with what to do, instead of a raw scanner code.
+
 ## [2.0.0] - 2026-11-03
 
 This release makes the app a scanning station for a Raspberry Pi that
