@@ -235,7 +235,9 @@ Errors look like `{"error": {"code": "no_paper", "message": "..."}}`.
 
 ## Releasing
 
-Releases are `vX.Y.Z` git tags. Pushing one runs CI, then builds the
+Releases are `vX.Y.Z` git tags. Add a `## [X.Y.Z]` section to
+[CHANGELOG.md](CHANGELOG.md) first; it becomes the release notes, and
+the release fails without it. Pushing the tag runs CI, then builds the
 image for amd64, arm64 and arm/v7, pushes it to
 `ghcr.io/<owner>/doxie-scanner`, and creates a GitHub release. A plain
 push to `main` only runs CI.
