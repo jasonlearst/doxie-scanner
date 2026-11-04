@@ -1,11 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/andiapps-dev/doxie-scanner/internal/housekeeping"
 	"github.com/andiapps-dev/doxie-scanner/internal/paperless"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
@@ -76,9 +81,9 @@ type sendRequest struct {
 	Documents []sendDocument `json:"documents"`
 }
 
-// handleSend splits a job into one or more documents and uploads each to
-// Paperless. A document that fails to build or upload is recorded as
-// failed rather than stopping the rest.
+// handleSend splits a job into one or more documents and hands them to
+// Paperless in the background: it records each as sending and answers
+// right away, so nobody waits for PDFs to be built and uploaded.
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePaperless(w) {
 		return
@@ -102,44 +107,115 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "nothing to send")
 		return
 	}
-	pagesPerDoc := make([][]storage.PageMeta, len(req.Documents))
+	batch := uploadBatch{jobID: id, docs: make([]pendingUpload, len(req.Documents))}
 	for i, d := range req.Documents {
 		if len(d.Pages) == 0 {
 			writeError(w, http.StatusBadRequest, "bad_request", "every document needs at least one page")
 			return
 		}
-		if pagesPerDoc[i], err = selectPages(meta, d.Pages); err != nil {
+		pages, err := selectPages(meta, d.Pages)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
-	}
-
-	results := make([]storage.SentDocument, 0, len(req.Documents))
-	for i, d := range req.Documents {
 		title := strings.TrimSpace(d.Title)
 		if title == "" {
 			title = meta.Name
 		}
-		sent := storage.SentDocument{Title: title, Pages: d.Pages, Status: paperless.TaskQueued, SentAt: s.now()}
-		if pdf, err := s.buildPDF(meta.ID, pagesPerDoc[i]); err != nil {
-			sent.Status, sent.Error = paperless.TaskFailed, err.Error()
-		} else if taskID, err := s.paperless.Upload(r.Context(), paperless.Document{
-			PDF: pdf, Filename: pdfFilename(title), Title: title, Created: d.Created,
+		batch.docs[i] = pendingUpload{pages: pages, doc: paperless.Document{
+			Filename: pdfFilename(title), Title: title, Created: d.Created,
 			Correspondent: d.Correspondent, DocumentType: d.DocumentType, Tags: d.Tags,
-		}); err != nil {
-			sent.Status, sent.Error = paperless.TaskFailed, err.Error()
-		} else {
-			sent.TaskID = taskID
-		}
-		results = append(results, sent)
+		}}
 	}
 
+	now := s.now()
 	updated, ok := s.mutateJob(w, r, func(m *storage.JobMeta) (int, string) {
-		m.Sent = append(m.Sent, results...)
+		batch.first = len(m.Sent)
+		for i, d := range req.Documents {
+			m.Sent = append(m.Sent, storage.SentDocument{Title: batch.docs[i].doc.Title, Pages: d.Pages, Status: storage.SentSending, SentAt: now})
+		}
 		return 0, ""
 	})
-	if ok {
-		writeJSON(w, http.StatusOK, s.toDetail(updated))
+	if !ok {
+		return
+	}
+	s.inBackground(func() { s.upload(batch) })
+	writeJSON(w, http.StatusAccepted, s.toDetail(updated))
+}
+
+// uploadBatch is one send: documents recorded in a job's Sent from index
+// first on, in order.
+type uploadBatch struct {
+	jobID string
+	first int
+	docs  []pendingUpload
+}
+
+type pendingUpload struct {
+	pages []storage.PageMeta
+	doc   paperless.Document
+}
+
+// uploadTimeout bounds one batch's uploads, so a hung Paperless can't hold
+// up every later send.
+const uploadTimeout = 10 * time.Minute
+
+func (s *Server) inBackground(f func()) {
+	s.background.Add(1)
+	go func() {
+		defer s.background.Done()
+		f()
+	}()
+}
+
+// upload builds each document's PDF and hands it to Paperless, recording
+// the task to follow, or why it couldn't be sent.
+func (s *Server) upload(b uploadBatch) {
+	s.uploadMu.Lock()
+	defer s.uploadMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
+	defer cancel()
+	for i, u := range b.docs {
+		status, taskID, failure := paperless.TaskQueued, "", ""
+		if pdf, err := s.buildPDF(b.jobID, u.pages); err != nil {
+			status, failure = paperless.TaskFailed, err.Error()
+		} else {
+			doc := u.doc
+			doc.PDF = pdf
+			if taskID, err = s.paperless.Upload(ctx, doc); err != nil {
+				status, failure = paperless.TaskFailed, err.Error()
+			}
+		}
+		_, err := s.store.UpdateMeta(b.jobID, func(m *storage.JobMeta) error {
+			if at := b.first + i; at < len(m.Sent) {
+				m.Sent[at].Status, m.Sent[at].TaskID, m.Sent[at].Error = status, taskID, failure
+			}
+			return nil
+		})
+		if err != nil {
+			log.Printf("send %s: %v", b.jobID, err)
+			return
+		}
+	}
+	s.inBackground(func() { s.follow(b.jobID) })
+}
+
+// follow asks Paperless about a job's uploads until it has filed them all,
+// for up to followFor; the hourly sweep picks up anything slower.
+func (s *Server) follow(jobID string) {
+	ticker := time.NewTicker(s.followEvery)
+	defer ticker.Stop()
+	deadline := time.After(s.followFor)
+	for {
+		select {
+		case <-deadline:
+			return
+		case <-ticker.C:
+		}
+		meta, err := s.keeper.RefreshSent(context.Background(), jobID)
+		if errors.Is(err, fs.ErrNotExist) || (err == nil && !housekeeping.Waiting(meta)) {
+			return
+		}
 	}
 }
 

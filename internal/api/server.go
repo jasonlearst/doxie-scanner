@@ -3,6 +3,7 @@ package api
 import (
 	"io/fs"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
@@ -29,6 +30,13 @@ type Server struct {
 	paperless *paperless.Client // nil when not configured
 	now       func() time.Time
 	keeper    *housekeeping.Keeper
+
+	// Sends are handed off to Paperless in the background, one at a time,
+	// and then followed until Paperless has filed them.
+	uploadMu    sync.Mutex
+	background  sync.WaitGroup
+	followEvery time.Duration
+	followFor   time.Duration
 }
 
 // Option configures optional integrations.
@@ -42,7 +50,8 @@ func WithPaperless(c *paperless.Client) Option {
 // NewServer builds a Server and wires its full route table. staticFS
 // serves the embedded frontend at "/"; it may be nil in tests.
 func NewServer(drv driver.Driver, jobs *scanjobs.Manager, store *storage.Store, staticFS fs.FS, version string, opts ...Option) *Server {
-	s := &Server{drv: drv, jobs: jobs, store: store, version: version, renderSlot: make(chan struct{}, 1), now: time.Now}
+	s := &Server{drv: drv, jobs: jobs, store: store, version: version, renderSlot: make(chan struct{}, 1), now: time.Now,
+		followEvery: 3 * time.Second, followFor: 15 * time.Minute}
 	for _, opt := range opts {
 		opt(s)
 	}

@@ -50,7 +50,6 @@ export const api = {
   paperless: () => request('GET', '/api/paperless'),
   paperlessMetadata: () => request('GET', '/api/paperless/metadata'),
   send: (id, documents) => request('POST', `/api/scans/${id}/send`, { documents }),
-  refreshSent: (id) => request('POST', `/api/scans/${id}/sent/refresh`),
 };
 
 export function pageImage(scanId, page, size, { uncropped = false, untoned = false } = {}) {

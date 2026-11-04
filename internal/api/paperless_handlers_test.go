@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 	"github.com/andiapps-dev/doxie-scanner/internal/paperless"
@@ -29,6 +30,13 @@ type fakePaperless struct {
 	failUploads  bool
 	unauthorized bool
 	queried      []string
+	hold         chan struct{} // uploads wait until it's closed, if set
+}
+
+func (f *fakePaperless) set(change func(*fakePaperless)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	change(f)
 }
 
 func (f *fakePaperless) serve(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +52,11 @@ func (f *fakePaperless) serve(w http.ResponseWriter, r *http.Request) {
 	case "/api/correspondents/", "/api/document_types/":
 		fmt.Fprint(w, `{"next":null,"results":[]}`)
 	case "/api/documents/post_document/":
+		if hold := f.hold; hold != nil {
+			f.mu.Unlock()
+			<-hold
+			f.mu.Lock()
+		}
 		if f.failUploads {
 			http.Error(w, "disk full", http.StatusInternalServerError)
 			return
@@ -69,6 +82,8 @@ func paperlessServer(t *testing.T, store *storage.Store) (*Server, *fakePaperles
 		store = storage.New(t.TempDir())
 	}
 	srv, _ := newTestServerAt(t, &fakeDriver{}, store, WithPaperless(paperless.New(pl.URL, "token")))
+	srv.followEvery, srv.followFor = 5*time.Millisecond, 200*time.Millisecond
+	t.Cleanup(srv.background.Wait)
 	return srv, fake
 }
 
@@ -115,9 +130,10 @@ func TestSend_SplitsIntoDocuments(t *testing.T) {
 		{"pages": []string{"001f", "001b"}, "title": "Water bill", "tags": []int{1}, "correspondent": 7},
 		{"pages": []string{"002f"}},
 	}})
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status %d %s", rec.Code, rec.Body)
 	}
+	srv.background.Wait()
 	if len(fake.uploads) != 2 {
 		t.Fatalf("uploads: %d", len(fake.uploads))
 	}
@@ -147,8 +163,10 @@ func TestSend_FailuresAreRecordedPerDocument(t *testing.T) {
 	srv, fake := paperlessServer(t, store)
 
 	do(srv, http.MethodPost, "/api/scans/job1/send", map[string]any{"documents": []map[string]any{{"pages": []string{"002f"}}, {"pages": []string{"001f"}}}})
-	fake.failUploads = true
+	srv.background.Wait()
+	fake.set(func(f *fakePaperless) { f.failUploads = true })
 	do(srv, http.MethodPost, "/api/scans/job1/send", map[string]any{"documents": []map[string]any{{"pages": []string{"001f"}}}})
+	srv.background.Wait()
 
 	meta, _ := store.LoadMeta("job1")
 	if len(meta.Sent) != 3 {
@@ -162,6 +180,66 @@ func TestSend_FailuresAreRecordedPerDocument(t *testing.T) {
 	}
 	if meta.Sent[2].Status != paperless.TaskFailed || meta.Sent[2].Error == "" {
 		t.Errorf("a rejected upload is recorded as failed: %+v", meta.Sent[2])
+	}
+}
+
+// Building and uploading PDFs takes seconds on a Raspberry Pi, so Send
+// answers first and hands off to Paperless in the background.
+func TestSend_AnswersBeforeUploading(t *testing.T) {
+	store := storage.New(t.TempDir())
+	seedJob(t, store, "job1", seedPage{id: "001f"})
+	srv, fake := paperlessServer(t, store)
+	hold := make(chan struct{})
+	fake.set(func(f *fakePaperless) { f.hold = hold })
+
+	rec := do(srv, http.MethodPost, "/api/scans/job1/send", map[string]any{"documents": []map[string]any{{"pages": []string{"001f"}}}})
+	got := decode[jobDetailResponse](t, rec)
+	if rec.Code != http.StatusAccepted || len(got.Sent) != 1 || got.Sent[0].Status != storage.SentSending {
+		t.Fatalf("status %d, sent %+v: want an immediate answer with the document sending", rec.Code, got.Sent)
+	}
+	if list := decode[[]jobSummary](t, do(srv, http.MethodGet, "/api/scans", nil)); list[0].Sent.Sending != 1 {
+		t.Errorf("the list should count the document as sending: %+v", list[0].Sent)
+	}
+
+	close(hold)
+	srv.background.Wait()
+	if meta, _ := store.LoadMeta("job1"); meta.Sent[0].TaskID != "task-1" || meta.Sent[0].Status != paperless.TaskQueued {
+		t.Errorf("after the hand-off: %+v", meta.Sent[0])
+	}
+}
+
+// Nobody has to keep the scan open for its status to catch up.
+func TestSend_FollowsTheUploadUntilPaperlessFilesIt(t *testing.T) {
+	store := storage.New(t.TempDir())
+	seedJob(t, store, "job1", seedPage{id: "001f"})
+	srv, fake := paperlessServer(t, store)
+	fake.set(func(f *fakePaperless) { f.tasks["task-1"] = `[{"status":"SUCCESS","related_document":"42"}]` })
+
+	do(srv, http.MethodPost, "/api/scans/job1/send", map[string]any{"documents": []map[string]any{{"pages": []string{"001f"}}}})
+	srv.background.Wait()
+
+	meta, _ := store.LoadMeta("job1")
+	if s := meta.Sent[0]; s.Status != paperless.TaskDone || s.DocumentID != 42 || s.FiledAt == nil {
+		t.Errorf("sent %+v: want it filed as document 42", s)
+	}
+}
+
+func TestSend_StopsFollowingADeletedScan(t *testing.T) {
+	store := storage.New(t.TempDir())
+	seedJob(t, store, "job1", seedPage{id: "001f"})
+	srv, _ := paperlessServer(t, store)
+	srv.followFor = time.Hour
+
+	do(srv, http.MethodPost, "/api/scans/job1/send", map[string]any{"documents": []map[string]any{{"pages": []string{"001f"}}}})
+	if err := store.DeleteJob("job1"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { srv.background.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("still following a scan that was deleted")
 	}
 }
 
