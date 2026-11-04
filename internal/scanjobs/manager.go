@@ -95,9 +95,10 @@ type scanReply struct {
 // and runs every scan, whether asked for by the button or by StartScan.
 // Only Run's goroutine ever touches the device.
 type Manager struct {
-	drv   driver.Driver
-	store *storage.Store
-	now   func() time.Time
+	drv     driver.Driver
+	store   *storage.Store
+	now     func() time.Time
+	process func(meta *storage.JobMeta, s scannedSheet) error
 
 	Timings Timings
 
@@ -124,13 +125,15 @@ var DefaultTimings = Timings{Reconnect: 2 * time.Second, ButtonPoll: 500 * time.
 // NewManager returns a Manager for the given driver and store. Call Run
 // to start using the scanner.
 func NewManager(drv driver.Driver, store *storage.Store) *Manager {
-	return &Manager{
+	m := &Manager{
 		drv:      drv,
 		store:    store,
 		now:      time.Now,
 		Timings:  DefaultTimings,
 		requests: make(chan scanRequest),
 	}
+	m.process = m.addSheet
+	return m
 }
 
 // CurrentJob returns a snapshot of the most recently started job's live
@@ -333,44 +336,92 @@ func (m *Manager) createJob(settings storage.ScanSettings) (storage.JobMeta, err
 }
 
 // run scans sheets until the feeders are empty and records the outcome.
+// sheetQueue is how many scanned sheets may wait to be processed before
+// feeding has to wait too.
+const sheetQueue = 64
+
+// run feeds sheets back to back and processes them on another goroutine.
+// The DX400 pulls in the next sheet as soon as one ends and abandons it
+// partway through if the host is slow to ask for it, and on a Raspberry
+// Pi 3 processing a sheet takes several seconds.
 func (m *Manager) run(ctx context.Context, sess driver.Session, meta storage.JobMeta) error {
 	opts := driver.ScanOptions{
 		Duplex:     meta.Settings.Sides != SidesSingle,
 		Resolution: meta.Settings.Resolution,
 	}
-	for sheet := 1; ; sheet++ {
-		hasNext, err := sess.HasNextPage(ctx)
-		if err != nil {
-			return m.finish(&meta, err)
-		}
-		if !hasNext {
-			return m.finish(&meta, nil)
-		}
+	sheets := make(chan scannedSheet, sheetQueue)
+	stop := make(chan struct{})
+	processed := make(chan error, 1)
+	go func() { processed <- m.processSheets(&meta, sheets, stop) }()
 
-		scanned, err := sess.ScanPage(ctx, opts)
-		if err != nil {
-			return m.finish(&meta, err)
-		}
-
-		front, err := m.addSide(meta.ID, sheet, "front", scanned.Front, meta.Settings)
-		if err != nil {
-			return m.finish(&meta, err)
-		}
-		meta.Pages = append(meta.Pages, front)
-		if scanned.Back != nil {
-			back, err := m.addSide(meta.ID, sheet, "back", *scanned.Back, meta.Settings)
-			if err != nil {
-				return m.finish(&meta, err)
-			}
-			meta.Pages = append(meta.Pages, back)
-		}
-
-		_ = m.store.SaveMeta(meta) // best-effort checkpoint; the final save happens regardless
-
-		m.mu.Lock()
-		m.running.PagesScanned = len(meta.VisiblePages())
-		m.mu.Unlock()
+	err := feed(ctx, sess, opts, sheets, stop)
+	close(sheets)
+	if procErr := <-processed; err == nil {
+		err = procErr
 	}
+	return m.finish(&meta, err)
+}
+
+func feed(ctx context.Context, sess driver.Session, opts driver.ScanOptions, sheets chan<- scannedSheet, stop <-chan struct{}) error {
+	for n := 1; ; n++ {
+		select {
+		case <-stop:
+			return nil
+		default:
+		}
+		hasNext, err := sess.HasNextPage(ctx)
+		if err != nil || !hasNext {
+			return err
+		}
+		page, err := sess.ScanPage(ctx, opts)
+		if err != nil {
+			return err
+		}
+		sheets <- scannedSheet{number: n, page: page}
+	}
+}
+
+// processSheets processes sheets in order. After a failure it closes stop
+// so feeding ends, and drops whatever is still queued.
+func (m *Manager) processSheets(meta *storage.JobMeta, sheets <-chan scannedSheet, stop chan<- struct{}) error {
+	var failed error
+	for s := range sheets {
+		if failed != nil {
+			continue
+		}
+		if failed = m.process(meta, s); failed != nil {
+			close(stop)
+		}
+	}
+	return failed
+}
+
+type scannedSheet struct {
+	number int
+	page   driver.Page
+}
+
+// addSheet adds a scanned sheet's sides to the job and checkpoints it.
+func (m *Manager) addSheet(meta *storage.JobMeta, s scannedSheet) error {
+	front, err := m.addSide(meta.ID, s.number, "front", s.page.Front, meta.Settings)
+	if err != nil {
+		return err
+	}
+	meta.Pages = append(meta.Pages, front)
+	if s.page.Back != nil {
+		back, err := m.addSide(meta.ID, s.number, "back", *s.page.Back, meta.Settings)
+		if err != nil {
+			return err
+		}
+		meta.Pages = append(meta.Pages, back)
+	}
+
+	_ = m.store.SaveMeta(*meta) // best-effort checkpoint; the final save happens regardless
+
+	m.mu.Lock()
+	m.running.PagesScanned = len(meta.VisiblePages())
+	m.mu.Unlock()
+	return nil
 }
 
 // addSide stores the scanner's JPEG untouched, then decodes it once to

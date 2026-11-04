@@ -56,6 +56,13 @@ func (s *fakeSession) ScanPage(ctx context.Context, opts driver.ScanOptions) (dr
 	return s.pages[s.idx-1], nil
 }
 
+// fed is how many sheets ScanPage has been asked for.
+func (s *fakeSession) fed() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idx
+}
+
 func (s *fakeSession) WaitForButton(ctx context.Context, timeout time.Duration) (bool, error) {
 	s.mu.Lock()
 	if s.buttonErr != nil {
