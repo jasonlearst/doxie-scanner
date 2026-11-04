@@ -447,6 +447,45 @@ func TestScan_ProcessingFailureStopsFeeding(t *testing.T) {
 	}
 }
 
+// Once processing has failed, the sheet already moving is read to the end
+// so it leaves the scanner, and no further sheet is asked for.
+func TestFeed_FinishesTheMovingSheetThenAsksForNoMore(t *testing.T) {
+	good := side(t, textPage())
+	stack := func() []driver.Page { return []driver.Page{sheet(good, nil), sheet(good, nil), sheet(good, nil)} }
+	cases := map[string]struct {
+		failDuring func(sess *fakeSession, fail func())
+		wantFed    int
+	}{
+		"while a sheet is moving": {func(sess *fakeSession, fail func()) {
+			sess.onScan = func(n int) {
+				if n == 2 {
+					fail()
+				}
+			}
+		}, 2},
+		"while checking for paper": {func(sess *fakeSession, fail func()) {
+			sess.onHasNext = func(n int) {
+				if n == 2 {
+					fail()
+				}
+			}
+		}, 1},
+	}
+	for name, c := range cases {
+		sess := &fakeSession{pages: stack()}
+		stop := make(chan struct{})
+		c.failDuring(sess, func() { close(stop) })
+		sheets := make(chan scannedSheet, sheetQueue)
+
+		if err := feed(context.Background(), sess, driver.ScanOptions{}, sheets, stop); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if sess.fed() != c.wantFed || len(sheets) != c.wantFed {
+			t.Errorf("%s: fed %d sheets and kept %d, want %d", name, sess.fed(), len(sheets), c.wantFed)
+		}
+	}
+}
+
 func TestStartScan_CreateJobError(t *testing.T) {
 	badRoot := t.TempDir() + "/blocker"
 	if err := os.WriteFile(badRoot, []byte("x"), 0o644); err != nil {
