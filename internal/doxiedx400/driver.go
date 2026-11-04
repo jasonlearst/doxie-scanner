@@ -2,6 +2,7 @@ package doxiedx400
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
@@ -39,15 +40,34 @@ func (d *dxDriver) Open(ctx context.Context) (driver.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &session{dev: dev}, nil
+	return &session{dev: dev, sleep: time.Sleep}, nil
 }
 
+// Within a stack, the next sheet can take a moment to reach the paper
+// sensor after the last one leaves.
+const (
+	nextSheetWait = time.Second
+	nextSheetPoll = 100 * time.Millisecond
+)
+
+// session follows Doxie's driver, which keeps the scan job reserved for a
+// whole stack and only releases the scan unit between sheets. Releasing
+// the job after every sheet left the next sheet half fed.
 type session struct {
-	dev scsiusb.BulkDevice
+	dev   scsiusb.BulkDevice
+	batch *window // the open stack's settings; nil between stacks
+	sleep func(time.Duration)
 }
 
+// HasNextPage reports whether paper is waiting. Inside a stack, "no
+// paper" only counts once it has lasted nextSheetWait.
 func (s *session) HasNextPage(ctx context.Context) (bool, error) {
-	return hasPaper(s.dev)
+	paper, err := hasPaper(s.dev)
+	for waited := time.Duration(0); err == nil && !paper && s.batch != nil && waited < nextSheetWait; waited += nextSheetPoll {
+		s.sleep(nextSheetPoll)
+		paper, err = hasPaper(s.dev)
+	}
+	return paper, err
 }
 
 func (s *session) ScanPage(ctx context.Context, opts driver.ScanOptions) (driver.Page, error) {
@@ -59,8 +79,9 @@ func (s *session) ScanPage(ctx context.Context, opts driver.ScanOptions) (driver
 	if err != nil {
 		return driver.Page{}, err
 	}
-	sides, err := scanSheet(s.dev, w, quantTables[res])
+	sides, err := s.scanSheet(w, quantTables[res])
 	if err != nil {
+		_ = s.EndBatch(ctx) // the scan error is what the person needs to see
 		return driver.Page{}, err
 	}
 
@@ -93,6 +114,37 @@ func (s *session) WaitForButton(ctx context.Context, timeout time.Duration) (boo
 	return n > 0 && buf[0]&buttonPressed != 0, nil
 }
 
+// scanSheet starts the batch with the full setup on its first sheet and
+// runs the shorter one before every later sheet.
+func (s *session) scanSheet(w window, quant []byte) ([][]byte, error) {
+	if s.batch != nil && *s.batch != w {
+		if err := s.EndBatch(context.Background()); err != nil {
+			return nil, err
+		}
+	}
+	if s.batch == nil {
+		if err := control(s.dev, opReserve, flagJob); err != nil {
+			return nil, err
+		}
+		s.batch = &w
+		if err := prepare(s.dev, w, quant); err != nil {
+			return nil, err
+		}
+	} else if err := prepareNext(s.dev, w); err != nil {
+		return nil, err
+	}
+	return scanSheet(s.dev, w, quant)
+}
+
+// EndBatch releases the scan job held for the stack.
+func (s *session) EndBatch(ctx context.Context) error {
+	if s.batch == nil {
+		return nil
+	}
+	s.batch = nil
+	return control(s.dev, opRelease, flagJob)
+}
+
 func (s *session) Close() error {
-	return s.dev.Close()
+	return errors.Join(s.EndBatch(context.Background()), s.dev.Close())
 }

@@ -10,21 +10,9 @@ import (
 // reports end-of-side can't spin forever.
 const maxChunksPerSheet = 1024
 
-// scanSheet feeds one sheet and returns a complete JPEG per side (front,
-// then rear when duplex). The command sequence mirrors Doxie's driver.
-func scanSheet(dev scsiusb.BulkDevice, w window, quant []byte) (sides [][]byte, err error) {
-	if err := control(dev, opReserve, flagJob); err != nil {
-		return nil, err
-	}
-	defer func() {
-		if endErr := control(dev, opRelease, flagJob); err == nil && endErr != nil {
-			sides, err = nil, endErr
-		}
-	}()
-
-	if err := prepare(dev, w, quant); err != nil {
-		return nil, err
-	}
+// scanSheet feeds one sheet of an open batch and returns a complete JPEG
+// per side (front, then rear when duplex).
+func scanSheet(dev scsiusb.BulkDevice, w window, quant []byte) ([][]byte, error) {
 	if err := control(dev, opReserve, flagScanUnit); err != nil {
 		return nil, err
 	}
@@ -37,10 +25,26 @@ func scanSheet(dev scsiusb.BulkDevice, w window, quant []byte) (sides [][]byte, 
 		return nil, relErr
 	}
 
+	sides := make([][]byte, len(raw))
 	for i := range raw {
-		sides = append(sides, wrapJPEG(w.width, lines[i], quant, raw[i]))
+		sides[i] = wrapJPEG(w.width, lines[i], quant, raw[i])
 	}
 	return sides, nil
+}
+
+// prepareNext is the shorter setup Doxie's driver repeats before each
+// later sheet of a stack.
+func prepareNext(dev scsiusb.BulkDevice, w window) error {
+	if err := setWindow(dev, w); err != nil {
+		return err
+	}
+	for _, dt := range []byte{dtTruncateHead, dtTruncateTail} {
+		if err := send(dev, dt, truncateNone); err != nil {
+			return err
+		}
+	}
+	_, err := read(dev, dtCalibrationFmt, calibrationFmtLen)
+	return err
 }
 
 func prepare(dev scsiusb.BulkDevice, w window, quant []byte) error {

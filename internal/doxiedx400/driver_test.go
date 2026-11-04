@@ -52,6 +52,101 @@ func TestHasNextPage(t *testing.T) {
 	}
 }
 
+func TestHasNextPage_WaitsForTheNextSheetInsideAStack(t *testing.T) {
+	dev := &fakeDevice{t: t}
+	dev.scriptFirstSheet(false, scriptedSide{filled(0x11, 10), 1})
+	dev.paper(false)
+	dev.paper(false)
+	dev.paper(true)
+	sess, sleeps := testSession(t, dev)
+	ctx := context.Background()
+	if _, err := sess.ScanPage(ctx, driver.ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if more, err := sess.HasNextPage(ctx); err != nil || !more || *sleeps != 2 {
+		t.Fatalf("got %v, %v after %d waits; want the sheet found after 2", more, err, *sleeps)
+	}
+}
+
+func TestHasNextPage_EmptyFeederEndsTheWait(t *testing.T) {
+	dev := &fakeDevice{t: t}
+	dev.scriptFirstSheet(false, scriptedSide{filled(0x11, 10), 1})
+	polls := int(nextSheetWait / nextSheetPoll)
+	for i := 0; i <= polls; i++ {
+		dev.paper(false)
+	}
+	sess, sleeps := testSession(t, dev)
+	ctx := context.Background()
+	if _, err := sess.ScanPage(ctx, driver.ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if more, err := sess.HasNextPage(ctx); err != nil || more || *sleeps != polls || len(dev.reads) != 0 {
+		t.Fatalf("got %v, %v after %d waits; want no paper after %d", more, err, *sleeps, polls)
+	}
+}
+
+func TestHasNextPage_OutsideAStackChecksOnce(t *testing.T) {
+	dev := &fakeDevice{t: t}
+	dev.paper(false)
+	sess, sleeps := testSession(t, dev)
+	if more, err := sess.HasNextPage(context.Background()); err != nil || more || *sleeps != 0 {
+		t.Fatalf("got %v, %v after %d waits", more, err, *sleeps)
+	}
+}
+
+func TestScanPage_NewSettingsStartANewStack(t *testing.T) {
+	side := scriptedSide{filled(0x11, 10), 1}
+	dev := &fakeDevice{t: t}
+	dev.scriptFirstSheet(false, side)
+	dev.ok(nil) // E7 job
+	dev.scriptFirstSheet(false, side)
+	sess, _ := testSession(t, dev)
+	ctx := context.Background()
+
+	for _, res := range []int{300, 600} {
+		if _, err := sess.ScanPage(ctx, driver.ScanOptions{Resolution: res}); err != nil {
+			t.Fatalf("%d dpi: %v", res, err)
+		}
+	}
+	reserves := 0
+	for _, op := range dev.opcodes() {
+		if op == [3]byte{opReserve, 0, flagJob} {
+			reserves++
+		}
+	}
+	if reserves != 2 || len(dev.reads) != 0 {
+		t.Errorf("reserved the job %d times with %d replies unused; want a fresh job for new settings", reserves, len(dev.reads))
+	}
+}
+
+func TestEndBatch_WithoutAStackSendsNothing(t *testing.T) {
+	dev := &fakeDevice{t: t}
+	sess, _ := testSession(t, dev)
+	if err := sess.EndBatch(context.Background()); err != nil || len(dev.commands) != 0 {
+		t.Fatalf("got %v with %d commands", err, len(dev.commands))
+	}
+}
+
+func TestSessionClose_EndsAnOpenStack(t *testing.T) {
+	dev := &fakeDevice{t: t}
+	dev.scriptFirstSheet(false, scriptedSide{filled(0x11, 10), 1})
+	dev.ok(nil) // E7 job
+	sess, _ := testSession(t, dev)
+	if _, err := sess.ScanPage(context.Background(), driver.ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := sess.Close(); err != nil || !dev.closed {
+		t.Fatalf("close: %v, closed=%v", err, dev.closed)
+	}
+	ops := dev.opcodes()
+	if last := ops[len(ops)-1]; last != [3]byte{opRelease, 0, flagJob} {
+		t.Errorf("last command %x, want the job released before closing", last)
+	}
+}
+
 func decodes(t *testing.T, s driver.Side) image.Point {
 	t.Helper()
 	img, err := jpeg.Decode(bytes.NewReader(s.JPEG))
@@ -63,7 +158,7 @@ func decodes(t *testing.T, s driver.Side) image.Point {
 
 func TestScanPage_DuplexReturnsBothSidesEvenWhenBlank(t *testing.T) {
 	dev := &fakeDevice{t: t}
-	dev.scriptSheet(true,
+	dev.scriptFirstSheet(true,
 		scriptedSide{fixture(t, "ink-300.scan"), 32},
 		scriptedSide{fixture(t, "blank-300.scan"), 32})
 
@@ -85,7 +180,7 @@ func TestScanPage_DuplexReturnsBothSidesEvenWhenBlank(t *testing.T) {
 
 func TestScanPage_200dpiReportsNonSquareSampling(t *testing.T) {
 	dev := &fakeDevice{t: t}
-	dev.scriptSheet(false, scriptedSide{fixture(t, "ink-300.scan"), 32})
+	dev.scriptFirstSheet(false, scriptedSide{fixture(t, "ink-300.scan"), 32})
 
 	page, err := openFake(t, dev).ScanPage(context.Background(), driver.ScanOptions{Resolution: 200})
 	if err != nil {
@@ -98,7 +193,7 @@ func TestScanPage_200dpiReportsNonSquareSampling(t *testing.T) {
 
 func TestScanPage_SimplexDefaultsTo300(t *testing.T) {
 	dev := &fakeDevice{t: t}
-	dev.scriptSheet(false, scriptedSide{fixture(t, "ink-300.scan"), 32})
+	dev.scriptFirstSheet(false, scriptedSide{fixture(t, "ink-300.scan"), 32})
 
 	page, err := openFake(t, dev).ScanPage(context.Background(), driver.ScanOptions{})
 	if err != nil {

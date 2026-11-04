@@ -44,6 +44,8 @@ func (s *fakeSession) WaitForButton(ctx context.Context, timeout time.Duration) 
 	return false, nil
 }
 
+func (s *fakeSession) EndBatch(ctx context.Context) error { return nil }
+
 func (s *fakeSession) Close() error { return nil }
 
 // fakeDriver hands out its one session, or openErr while the scanner is

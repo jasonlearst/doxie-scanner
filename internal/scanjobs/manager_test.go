@@ -486,6 +486,25 @@ func TestFeed_FinishesTheMovingSheetThenAsksForNoMore(t *testing.T) {
 	}
 }
 
+func TestScan_EndsTheScannersBatchOnceFeedingStops(t *testing.T) {
+	good := side(t, textPage())
+	sess, _, _ := scan(t, storage.ScanSettings{Sides: SidesSingle}, sheet(good, nil), sheet(good, nil))
+	if n := sess.batchesEnded(); n != 1 {
+		t.Errorf("after the feeder emptied: ended the batch %d times, want 1", n)
+	}
+
+	jammed := &fakeSession{pages: []driver.Page{sheet(good, nil), sheet(good, nil)}, scanErr: errTest("paper jam"), scanErrAt: 2}
+	failedScan(t, jammed)
+	if n := jammed.batchesEnded(); n != 1 {
+		t.Errorf("after a failed sheet: ended the batch %d times, want 1", n)
+	}
+
+	refused := &fakeSession{pages: []driver.Page{sheet(good, nil)}, endBatchErr: errTest("release refused")}
+	if state, _ := failedScan(t, refused); !errors.Is(state.Err, errTest("release refused")) {
+		t.Errorf("a failed release should fail the scan, got %v", state.Err)
+	}
+}
+
 func TestStartScan_CreateJobError(t *testing.T) {
 	badRoot := t.TempDir() + "/blocker"
 	if err := os.WriteFile(badRoot, []byte("x"), 0o644); err != nil {
