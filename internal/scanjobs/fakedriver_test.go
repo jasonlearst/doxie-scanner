@@ -28,9 +28,21 @@ type fakeSession struct {
 
 	closed int
 	opts   []driver.ScanOptions
+
+	// Called during the nth HasNextPage and ScanPage, outside the lock.
+	onHasNext func(n int)
+	onScan    func(n int)
+	hasNexts  int
 }
 
 func (s *fakeSession) HasNextPage(ctx context.Context) (bool, error) {
+	s.mu.Lock()
+	s.hasNexts++
+	n, hook := s.hasNexts, s.onHasNext
+	s.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.hasNextErr != nil {
@@ -40,6 +52,12 @@ func (s *fakeSession) HasNextPage(ctx context.Context) (bool, error) {
 }
 
 func (s *fakeSession) ScanPage(ctx context.Context, opts driver.ScanOptions) (driver.Page, error) {
+	s.mu.Lock()
+	n, hook := s.idx+1, s.onScan
+	s.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.idx++

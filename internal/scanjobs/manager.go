@@ -362,16 +362,18 @@ func (m *Manager) run(ctx context.Context, sess driver.Session, meta storage.Job
 	return m.finish(&meta, err)
 }
 
+// feed scans sheets until the feeder is empty or stop is closed. A sheet
+// already moving is always read to the end so it leaves the scanner.
 func feed(ctx context.Context, sess driver.Session, opts driver.ScanOptions, sheets chan<- scannedSheet, stop <-chan struct{}) error {
 	for n := 1; ; n++ {
+		hasNext, err := sess.HasNextPage(ctx)
+		if err != nil || !hasNext {
+			return err
+		}
 		select {
 		case <-stop:
 			return nil
 		default:
-		}
-		hasNext, err := sess.HasNextPage(ctx)
-		if err != nil || !hasNext {
-			return err
 		}
 		page, err := sess.ScanPage(ctx, opts)
 		if err != nil {
