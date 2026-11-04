@@ -5,6 +5,52 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/) — tags look
 like `v1.2.0`, and each one gets its own section below.
 
+## [2.0.0] - 2026-11-03
+
+This release makes the app a scanning station for a Raspberry Pi that
+hands finished documents to Paperless-ngx. It replaces the 1.x
+interface and drops features that Paperless already provides.
+
+### Added
+
+- Send scans to Paperless-ngx, split into several documents if needed,
+  with a title, date, correspondent, document type and tags picked from
+  Paperless's own lists. The app follows each upload until Paperless has
+  filed it, then links to the document. Set `DOXIE_PAPERLESS_URL` and
+  `DOXIE_PAPERLESS_TOKEN` to turn it on.
+- The scanner's own Scan button starts a scan with its own saved
+  settings. Button scans wait for review; nothing is sent by itself.
+- Scan settings: 200, 300 or 600 dpi; one side, both sides, or Auto
+  (both sides, blank backs hidden); color, gray, black & white, or Auto,
+  which picks per page.
+- Brightness, contrast and color mode per page, alongside rotate, crop,
+  hide, delete and reorder. Edits never change the scanned image, so
+  they can always be undone.
+- PDF downloads of a whole scan, one document or a single page.
+- Scans are deleted a set time after Paperless files them.
+- Docker images for Raspberry Pi (linux/arm64 and linux/arm/v7) next to
+  linux/amd64, and a compose file for running on a Pi.
+
+### Changed
+
+- A new phone-first web interface, also laid out for tablets and
+  laptops, replaces the Bootstrap one.
+- The DX400 driver uses the scanner's on-device JPEG mode, several times
+  faster than reading raw pixels. Scanner JPEGs are kept exactly as they
+  arrive.
+- Scanner status and errors are in plain language, including when the
+  scanner has switched itself off. The app reconnects by itself when it
+  is turned back on.
+
+### Removed
+
+- "Extract Text" and `DOXIE_OCR_LANG`. Paperless runs OCR on everything
+  it receives.
+- Combining pages from different scans into one PDF, and PNG/JPEG export
+  of single pages.
+- The Spanish translation. The new interface is English only for now.
+- Scans saved by 1.x are not carried over to the new storage format.
+
 ## [1.0.8] - 2026-09-14
 
 ### Changed
