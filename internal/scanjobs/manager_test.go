@@ -9,6 +9,7 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -383,6 +384,66 @@ func TestScan_FailureMidLoopKeepsEarlierPages(t *testing.T) {
 	})
 	if state.PagesScanned != 1 || len(meta.Pages) != 1 {
 		t.Errorf("sheet 1 should be kept: scanned=%d pages=%d", state.PagesScanned, len(meta.Pages))
+	}
+}
+
+// The DX400 pulls in the next sheet as soon as one ends and abandons it
+// partway through if the host is slow to ask for it. On a Raspberry Pi 3
+// processing a sheet takes seconds, so it must not hold up feeding.
+func TestScan_FeedsTheNextSheetWithoutWaitingForProcessing(t *testing.T) {
+	good := side(t, textPage())
+	sess := &fakeSession{pages: []driver.Page{sheet(good, nil), sheet(good, nil), sheet(good, nil)}}
+	m, store := startManager(t, &fakeDriver{session: sess})
+	release := make(chan struct{})
+	var once sync.Once
+	finishProcessing := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(finishProcessing)
+	process := m.process
+	m.process = func(meta *storage.JobMeta, s scannedSheet) error {
+		<-release
+		return process(meta, s)
+	}
+
+	id, err := m.StartScan(WithDefaults(storage.ScanSettings{Sides: SidesSingle}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "every sheet to be fed while the first is still processing", func() bool { return sess.fed() == 3 })
+	finishProcessing()
+
+	if state := finished(t, m); state.Status != storage.StatusCompleted || state.PagesScanned != 3 {
+		t.Fatalf("status %v, %d pages: %v", state.Status, state.PagesScanned, state.Err)
+	}
+	if meta, _ := store.LoadMeta(id); len(meta.Pages) != 3 {
+		t.Errorf("stored %d pages, want 3", len(meta.Pages))
+	}
+}
+
+func TestScan_ProcessingFailureStopsFeeding(t *testing.T) {
+	good := side(t, textPage())
+	pages := make([]driver.Page, 200)
+	for i := range pages {
+		pages[i] = sheet(good, nil)
+	}
+	sess := &fakeSession{pages: pages}
+	m, _ := startManager(t, &fakeDriver{session: sess})
+	process := m.process
+	m.process = func(meta *storage.JobMeta, s scannedSheet) error {
+		if s.number == 1 {
+			return errTest("unreadable sheet")
+		}
+		return process(meta, s)
+	}
+
+	if _, err := m.StartScan(DefaultSettings); err != nil {
+		t.Fatal(err)
+	}
+	state := finished(t, m)
+	if state.Status != storage.StatusFailed || !errors.Is(state.Err, errTest("unreadable sheet")) {
+		t.Fatalf("status %v: %v", state.Status, state.Err)
+	}
+	if fed := sess.fed(); fed >= len(pages) {
+		t.Errorf("fed all %d sheets after the first could not be processed", fed)
 	}
 }
 

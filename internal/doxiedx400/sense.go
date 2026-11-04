@@ -10,10 +10,11 @@ import (
 
 // Conditions the scanner reports, worded for the person at the scanner.
 var (
-	ErrNoPaper   = errors.New("no paper in the feeder")
-	ErrPaperJam  = errors.New("paper jam: open the scanner, remove the sheet, then turn it off and on")
-	ErrCoverOpen = errors.New("the scanner is open: close it and try again")
-	ErrMultiFeed = errors.New("two sheets went through at once: rescan them one at a time")
+	ErrNoPaper    = errors.New("no paper in the feeder")
+	ErrPaperJam   = errors.New("paper jam: open the scanner, remove the sheet, then turn it off and on")
+	ErrCoverOpen  = errors.New("the scanner is open: close it and try again")
+	ErrMultiFeed  = errors.New("two sheets went through at once: rescan them one at a time")
+	ErrSheetStuck = errors.New("a sheet stopped partway through the scanner: open the scanner, take the sheet out, then scan the rest again")
 )
 
 var senseErrors = map[byte]error{
@@ -21,6 +22,7 @@ var senseErrors = map[byte]error{
 	ascqCoverOpen:  ErrCoverOpen,
 	ascqChuteEmpty: ErrNoPaper,
 	ascqMultiFeed:  ErrMultiFeed,
+	ascqSheetStuck: ErrSheetStuck,
 }
 
 const (
@@ -36,6 +38,9 @@ const (
 	ascqChuteEmpty = 0x03
 	ascqPaperEnd   = 0x04
 	ascqMultiFeed  = 0x05
+	// Seen when the host was seconds late asking for a sheet the scanner
+	// had already started pulling in; the sheet stays where it stopped.
+	ascqSheetStuck = 0x09
 )
 
 // sense is the vendor sense block (opcode 0xE3). At the end of a side it
