@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"image"
+	"image/color"
+	"image/draw"
 	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
@@ -254,5 +256,75 @@ func TestPageImage_WithoutToneForTheAdjustPanel(t *testing.T) {
 	untoned := mean("/api/scans/job1/pages/001f/image?size=thumb&tone=none")
 	if toned-untoned < 20 {
 		t.Errorf("tone=none should drop the brightening: toned %.0f, untoned %.0f", toned, untoned)
+	}
+}
+
+func TestEditPage_Straighten(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f"})
+
+	if _, page := editPage(t, srv, map[string]any{"straighten": -1.5}); page.Edits.Straighten != -1.5 {
+		t.Errorf("straighten %v, want -1.5", page.Edits.Straighten)
+	}
+	if rec, _ := editPage(t, srv, map[string]any{"straighten": 20}); rec.Code != http.StatusBadRequest {
+		t.Errorf("20°: status %d, want 400", rec.Code)
+	}
+}
+
+func TestEditPage_AutoCropGoesBackToTheStoredPaper(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f", edits: pageimage.Edits{Rotation: 90, Brightness: 15}})
+	meta, _ := store.LoadMeta("job1")
+	meta.Pages[0].Paper = &pageimage.Paper{Straighten: 0.5, Crop: pageimage.Crop{X: 2, Y: 3, W: 50, H: 80}}
+	if err := store.SaveMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+
+	_, page := editPage(t, srv, map[string]any{"autoCrop": true})
+	e := page.Edits
+	if e.Straighten != 0.5 || e.Brightness != 15 || e.Rotation != 90 {
+		t.Errorf("edits %+v: want the stored straightening, other edits kept", e)
+	}
+	if want := (pageimage.Crop{X: 7, Y: 2, W: 80, H: 50}); e.Crop == nil || *e.Crop != want {
+		t.Errorf("crop %+v, want %+v in the page's turned frame", e.Crop, want)
+	}
+}
+
+// narrowScan is a sheet narrower than the scanner on its gray backing.
+func narrowScan() *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, 600, 800))
+	draw.Draw(img, img.Bounds(), &image.Uniform{color.NRGBA{176, 178, 177, 255}}, image.Point{}, draw.Src)
+	draw.Draw(img, image.Rect(60, 0, 540, 800), &image.Uniform{color.White}, image.Point{}, draw.Src)
+	return img
+}
+
+func TestEditPage_AutoCropFindsTheSheetInAnOlderScan(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f"})
+	meta, _ := store.LoadMeta("job1")
+	meta.Pages[0].WidthPx, meta.Pages[0].HeightPx = 600, 800
+	if err := store.SaveMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SavePageFile("job1", "001f.jpg", jpegBytes(t, narrowScan())); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, page := editPage(t, srv, map[string]any{"autoCrop": true})
+	if c := page.Edits.Crop; rec.Code != http.StatusOK || c == nil || c.X < 58 || c.X > 66 || c.X+c.W < 534 || c.X+c.W > 542 {
+		t.Fatalf("status %d, crop %+v: want the sheet at x 60..540", rec.Code, c)
+	}
+	if meta, _ := store.LoadMeta("job1"); meta.Pages[0].Paper == nil {
+		t.Error("the sheet found should be kept for next time")
+	}
+}
+
+func TestEditPage_AutoCropWithNoBackingShowing(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f"})
+
+	rec, _ := editPage(t, srv, map[string]any{"autoCrop": true})
+	if rec.Code != http.StatusUnprocessableEntity || !bytes.Contains(rec.Body.Bytes(), []byte("nothing to crop")) {
+		t.Errorf("status %d %s, want 422 saying there's nothing to crop", rec.Code, rec.Body)
 	}
 }

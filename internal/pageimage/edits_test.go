@@ -1,9 +1,12 @@
 package pageimage
 
 import (
+	"bytes"
 	"image"
 	"image/color"
 	"image/draw"
+	"image/jpeg"
+	"math"
 	"testing"
 )
 
@@ -13,6 +16,7 @@ func TestEditsValidate(t *testing.T) {
 		{Rotation: 270, Brightness: -100, Contrast: 100, Color: ColorBW},
 		{Crop: &Crop{X: 0, Y: 0, W: 100, H: 50}},
 		{Rotation: 90, Crop: &Crop{X: 0, Y: 0, W: 50, H: 100}},
+		{Straighten: -MaxStraighten}, {Straighten: 1.25},
 	}
 	for _, e := range ok {
 		if err := e.Validate(100, 50); err != nil {
@@ -27,6 +31,7 @@ func TestEditsValidate(t *testing.T) {
 		{Crop: &Crop{X: 50, Y: 0, W: 51, H: 10}},
 		{Crop: &Crop{X: 0, Y: 0, W: 0, H: 10}},
 		{Rotation: 90, Crop: &Crop{X: 0, Y: 0, W: 100, H: 50}},
+		{Straighten: MaxStraighten + 0.5}, {Straighten: math.NaN()},
 	}
 	for _, e := range bad {
 		if err := e.Validate(100, 50); err == nil {
@@ -39,7 +44,7 @@ func TestEditsIsIdentity(t *testing.T) {
 	if !(Edits{}).IsIdentity() || !(Edits{Color: ColorColor}).IsIdentity() {
 		t.Error("empty edits and explicit color should be identity")
 	}
-	for _, e := range []Edits{{Rotation: 90}, {Crop: &Crop{W: 1, H: 1}}, {Brightness: 1}, {Contrast: 1}, {Color: ColorGray}} {
+	for _, e := range []Edits{{Straighten: 0.5}, {Rotation: 90}, {Crop: &Crop{W: 1, H: 1}}, {Brightness: 1}, {Contrast: 1}, {Color: ColorGray}} {
 		if e.IsIdentity() {
 			t.Errorf("%+v should not be identity", e)
 		}
@@ -61,6 +66,58 @@ func TestRender_CropIsInTheRotatedFrame(t *testing.T) {
 	}
 	if r, _, _, _ := out.At(15, 25).RGBA(); r == 0 {
 		t.Error("only the marker corner should be dark")
+	}
+}
+
+// tilted draws a scene turned clockwise by degrees about the image center:
+// paint gets each pixel's position in the untilted scene, relative to the
+// center.
+func tilted(w, h int, degrees float64, paint func(x, y float64) color.Color) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	sin, cos := math.Sincos(degrees * math.Pi / 180)
+	cx, cy := float64(w)/2, float64(h)/2
+	for py := 0; py < h; py++ {
+		for px := 0; px < w; px++ {
+			dx, dy := float64(px)+0.5-cx, float64(py)+0.5-cy
+			img.Set(px, py, paint(dx*cos+dy*sin, -dx*sin+dy*cos))
+		}
+	}
+	return img
+}
+
+// barColumn is the mean column of the dark pixels in row y.
+func barColumn(img image.Image, y int) float64 {
+	b := img.Bounds()
+	sum, n := 0.0, 0
+	for x := b.Min.X; x < b.Max.X; x++ {
+		if r, _, _, _ := img.At(x, y).RGBA(); r < 0x8000 {
+			sum += float64(x)
+			n++
+		}
+	}
+	return sum / float64(n)
+}
+
+func TestRender_StraightenTurnsCounterClockwise(t *testing.T) {
+	bar := tilted(200, 200, 5, func(x, y float64) color.Color {
+		if math.Abs(x) <= 3 {
+			return color.Black
+		}
+		return color.White
+	})
+	if lean := barColumn(bar, 20) - barColumn(bar, 180); lean < 10 {
+		t.Fatalf("a bar turned clockwise should lean right at the top, leans %.1f px", lean)
+	}
+
+	out := Render(bar, Edits{Straighten: 5})
+	if got := out.Bounds().Size(); got != (image.Point{200, 200}) {
+		t.Fatalf("size: got %v, want the original 200x200", got)
+	}
+	if lean := barColumn(out, 20) - barColumn(out, 180); math.Abs(lean) > 1.5 {
+		t.Errorf("straightening by the tilt should stand the bar upright, it still leans %.1f px", lean)
+	}
+	if r, g, b, _ := out.At(0, 0).RGBA(); r != 0xffff || g != 0xffff || b != 0xffff {
+		t.Error("uncovered corners should be white")
 	}
 }
 
@@ -167,3 +224,29 @@ func TestRenderView(t *testing.T) {
 		t.Error("expected an unknown size to fail")
 	}
 }
+
+func TestRenderView_ShrinksFirstWithoutChangingTheResult(t *testing.T) {
+	img := textLike(2400, 3200)
+	for _, e := range []Edits{
+		{},
+		{Straighten: 1.5, Crop: &Crop{X: 100, Y: 120, W: 2000, H: 2800}},
+		{Rotation: 90, Crop: &Crop{X: 0, Y: 0, W: 3200, H: 1200}, Color: ColorBW},
+	} {
+		for size, box := range Sizes {
+			data, err := RenderView(img, e, size)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := jpeg.DecodeConfig(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := Fit(Render(img, e), box.X, box.Y).Bounds()
+			if abs(got.Width-want.Dx()) > 2 || abs(got.Height-want.Dy()) > 2 {
+				t.Errorf("%+v at %s: %dx%d, want %dx%d", e, size, got.Width, got.Height, want.Dx(), want.Dy())
+			}
+		}
+	}
+}
+
+func abs(v int) int { return max(v, -v) }

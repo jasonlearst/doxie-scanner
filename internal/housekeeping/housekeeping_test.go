@@ -50,6 +50,7 @@ func TestImported(t *testing.T) {
 		"hidden pages don't count": {job("b", hidden, sent("done", 9, "001f")), true},
 		"a page never sent":        {job("c", pages("001f", "002f"), sent("done", 9, "001f")), false},
 		"an upload still waiting":  {job("d", pages("001f"), sent("done", 9, "001f"), sent("queued", 1, "001f")), false},
+		"still being sent":         {job("i", pages("001f"), sent("done", 9, "001f"), storage.SentDocument{Status: storage.SentSending, Pages: []string{"001f"}, SentAt: now}), false},
 		"failed but resent":        {job("e", pages("001f"), sent("failed", 9, "001f"), sent("done", 8, "001f")), true},
 		"only a failure":           {job("f", pages("001f"), sent("failed", 9, "001f")), false},
 		"never sent":               {job("g", pages("001f")), false},
@@ -223,5 +224,28 @@ func TestRun_StopsWithContext(t *testing.T) {
 	<-done
 	if exists(store, "old") {
 		t.Error("Run should have swept")
+	}
+}
+
+func TestFailInterrupted(t *testing.T) {
+	k, store := keeper(t, nil)
+	sending := storage.SentDocument{Status: storage.SentSending, Pages: []string{"001f"}, SentAt: now}
+	save(t, store, job("cut-off", pages("001f"), sent("done", 1, "001f"), sending))
+	save(t, store, job("untouched", pages("001f"), sent("queued", 1, "001f")))
+
+	k.FailInterrupted()
+
+	cut, _ := store.LoadMeta("cut-off")
+	if s := cut.Sent[1]; s.Status != paperless.TaskFailed || s.Error != ErrInterrupted {
+		t.Errorf("a send cut off by a restart should fail so it can be resent: %+v", s)
+	}
+	if cut.Sent[0].Status != paperless.TaskDone {
+		t.Error("finished uploads must be left alone")
+	}
+	if u, _ := store.LoadMeta("untouched"); u.Sent[0].Status != paperless.TaskQueued {
+		t.Error("a handed-off upload is still Paperless's to finish")
+	}
+	if Waiting(cut) {
+		t.Error("nothing is on its way once the interrupted send has failed")
 	}
 }

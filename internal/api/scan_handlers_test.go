@@ -275,12 +275,12 @@ func TestListScans_SentCountsAndError(t *testing.T) {
 	srv, store := newTestServer(t, &fakeDriver{})
 	meta := seedJob(t, store, "job1", seedPage{id: "001f"})
 	meta.Error = "paper jam"
-	meta.Sent = []storage.SentDocument{{Status: "done"}, {Status: "failed"}, {Status: "queued"}}
+	meta.Sent = []storage.SentDocument{{Status: "done"}, {Status: "failed"}, {Status: "queued"}, {Status: "sending"}}
 	if err := store.SaveMeta(meta); err != nil {
 		t.Fatal(err)
 	}
 	got := decode[[]jobSummary](t, do(srv, http.MethodGet, "/api/scans", nil))[0]
-	if got.Sent != (sentCounts{Total: 3, Done: 1, Failed: 1}) || got.Error != "paper jam" {
+	if got.Sent != (sentCounts{Total: 4, Sending: 1, Done: 1, Failed: 1}) || got.Error != "paper jam" {
 		t.Errorf("got %+v", got)
 	}
 }

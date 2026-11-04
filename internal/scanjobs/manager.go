@@ -430,8 +430,8 @@ func (m *Manager) addSheet(meta *storage.JobMeta, s scannedSheet) error {
 }
 
 // addSide stores the scanner's JPEG untouched, then decodes it once to
-// judge blankness and color and to pre-render the thumbnail the UI shows
-// first. A blank back is hidden, never discarded, and only when the user
+// find the sheet in it (crop and straighten), judge blankness and color,
+// and pre-render the thumbnail the UI shows first. A blank back is hidden, never discarded, and only when the user
 // chose Auto sides: a back with only a signature can look blank.
 func (m *Manager) addSide(jobID string, sheet int, side string, s driver.Side, settings storage.ScanSettings) (storage.PageMeta, error) {
 	pageID := storage.PageID(sheet, side)
@@ -452,7 +452,11 @@ func (m *Manager) addSide(jobID string, sheet int, side string, s driver.Side, s
 		return page, fmt.Errorf("scanjobs: sheet %d %s: %w", sheet, side, err)
 	}
 	page.WidthPx, page.HeightPx = img.Bounds().Dx(), img.Bounds().Dy()
-	page.Blank = side == "back" && pageimage.IsBlank(img)
+	if paper, found := pageimage.DetectPaper(img); found {
+		page.Paper = &paper
+		page.Edits = paper.Apply(page.Edits, page.WidthPx, page.HeightPx)
+	}
+	page.Blank = side == "back" && pageimage.IsBlankPaper(img, page.Edits)
 	page.Hidden = page.Blank && settings.Sides == SidesAuto
 
 	page.Edits.Color = pageimage.ColorMode(settings.Color)

@@ -2,6 +2,7 @@ package paperless
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,6 +70,22 @@ func TestMetadataFollowsPages(t *testing.T) {
 	}
 	if len(m.Tags) != 2 || m.Tags[1].Name != "Taxes" || m.Correspondents[0].ID != 7 || m.DocumentTypes[0].Name != "Invoice" {
 		t.Errorf("got %+v", m)
+	}
+}
+
+// A Paperless with no correspondents or document types yet must still
+// give the send sheet lists to show.
+func TestMetadataEmptyListsAreEmptyNotNull(t *testing.T) {
+	c := fakePaperless(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"next":null,"results":[]}`)
+	})
+	m, err := c.Metadata(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(m)
+	if want := `{"tags":[],"correspondents":[],"documentTypes":[]}`; string(b) != want {
+		t.Errorf("got %s, want %s", b, want)
 	}
 }
 

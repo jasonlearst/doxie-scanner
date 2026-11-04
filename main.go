@@ -59,6 +59,7 @@ func main() {
 		log.Printf("sending to Paperless at %s", cfg.PaperlessURL)
 	}
 	srv := api.NewServer(drv, mgr, store, web.FS(), version, opts...)
+	srv.Housekeeper().FailInterrupted()
 	go srv.Housekeeper().Run(context.Background(), time.Hour)
 
 	log.Printf("doxie-scanner %s listening on %s (driver=%s)", version, cfg.ListenAddr, cfg.DriverName)

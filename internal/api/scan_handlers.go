@@ -92,9 +92,10 @@ type jobSummary struct {
 // sentCounts summarize a job's uploads so a list can say whether it still
 // needs review, is waiting on Paperless, or is filed.
 type sentCounts struct {
-	Total  int `json:"total"`
-	Done   int `json:"done"`
-	Failed int `json:"failed"`
+	Total   int `json:"total"`
+	Sending int `json:"sending"`
+	Done    int `json:"done"`
+	Failed  int `json:"failed"`
 }
 
 func toSummary(j storage.JobMeta) jobSummary {
@@ -111,6 +112,8 @@ func toSummary(j storage.JobMeta) jobSummary {
 	for _, sent := range j.Sent {
 		sum.Sent.Total++
 		switch sent.Status {
+		case storage.SentSending:
+			sum.Sent.Sending++
 		case paperless.TaskDone:
 			sum.Sent.Done++
 		case paperless.TaskFailed:

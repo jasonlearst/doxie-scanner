@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"net/http"
@@ -113,6 +114,10 @@ func (s *Server) handlePageOriginal(w http.ResponseWriter, r *http.Request) {
 // is raw so that "crop": null (clear it) differs from no crop key at all.
 // A crop given with a rotation is in the new rotation's frame.
 type editPageRequest struct {
+	// AutoCrop straightens and crops the page to the sheet found in it;
+	// any other field given alongside overrides what it sets.
+	AutoCrop   bool                 `json:"autoCrop"`
+	Straighten *float64             `json:"straighten"`
 	Rotation   *int                 `json:"rotation"`
 	Crop       json.RawMessage      `json:"crop"`
 	Brightness *int                 `json:"brightness"`
@@ -121,8 +126,19 @@ type editPageRequest struct {
 	Hidden     *bool                `json:"hidden"`
 }
 
+var errNothingToCrop = errors.New("no backing shows around this page, so there's nothing to crop")
+
 func (req editPageRequest) apply(p storage.PageMeta) (storage.PageMeta, error) {
 	e := p.Edits
+	if req.AutoCrop {
+		if p.Paper == nil {
+			return p, errNothingToCrop
+		}
+		e = p.Paper.Apply(e, p.WidthPx, p.HeightPx)
+	}
+	if req.Straighten != nil {
+		e.Straighten = *req.Straighten
+	}
 	if req.Rotation != nil {
 		e = e.WithRotation(*req.Rotation, p.WidthPx, p.HeightPx)
 	}
@@ -163,14 +179,26 @@ func (s *Server) handleEditPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pageID := r.PathValue("page")
+	var paper *pageimage.Paper
+	if req.AutoCrop {
+		var ok bool
+		if paper, ok = s.findPaper(w, r); !ok {
+			return
+		}
+	}
 	var edited storage.PageMeta
 	meta, ok := s.mutateJob(w, r, func(meta *storage.JobMeta) (int, string) {
 		page, i, found := meta.FindPage(pageID)
 		if !found {
 			return http.StatusNotFound, "page not found"
 		}
+		if page.Paper == nil {
+			page.Paper = paper
+		}
 		var err error
-		if edited, err = req.apply(page); err != nil {
+		if edited, err = req.apply(page); errors.Is(err, errNothingToCrop) {
+			return http.StatusUnprocessableEntity, err.Error()
+		} else if err != nil {
 			return http.StatusBadRequest, err.Error()
 		}
 		meta.Pages[i] = edited
@@ -181,6 +209,28 @@ func (s *Server) handleEditPage(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.DeleteRenders(meta.ID, pageID) // stale renders are only wasted disk; keys already differ
 	writeJSON(w, http.StatusOK, toPageResponse(edited))
+}
+
+// findPaper returns where the sheet lies in a page, looking for it now if
+// the page was scanned before sheets were detected. A nil paper means
+// none was found.
+func (s *Server) findPaper(w http.ResponseWriter, r *http.Request) (*pageimage.Paper, bool) {
+	meta, page, ok := s.loadPage(w, r)
+	if !ok || page.Paper != nil {
+		return page.Paper, ok
+	}
+	var paper *pageimage.Paper
+	err := s.withDecodedPage(meta.ID, page, func(img image.Image) error {
+		if p, found := pageimage.DetectPaper(img); found {
+			paper = &p
+		}
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return nil, false
+	}
+	return paper, true
 }
 
 func (s *Server) handleDeletePage(w http.ResponseWriter, r *http.Request) {

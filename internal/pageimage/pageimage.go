@@ -48,6 +48,15 @@ const (
 	blankInkFractionThreshold = 0.02
 )
 
+// IsBlankPaper reports whether the sheet, as straightened and cropped by e,
+// looks unprinted. Judging the whole scan would count the darker backing
+// beside a narrow sheet as ink.
+func IsBlankPaper(img image.Image, e Edits) bool {
+	small := analysisCopy(img)
+	f := float64(small.Rect.Dx()) / float64(img.Bounds().Dx())
+	return IsBlank(Render(small, Edits{Straighten: e.Straighten, Rotation: e.Rotation, Crop: e.scaled(f).Crop}))
+}
+
 // IsBlank reports whether a side looks unprinted.
 func IsBlank(img image.Image) bool {
 	small := analysisCopy(img)

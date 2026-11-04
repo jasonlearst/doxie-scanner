@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/color"
 	"image/jpeg"
+	"math"
 
 	"github.com/disintegration/imaging"
 )
@@ -34,6 +36,7 @@ type Crop struct {
 // Edits are applied on top of the untouched original every time a page
 // is rendered, so any of them can be changed or undone later.
 type Edits struct {
+	Straighten float64   `json:"straighten,omitempty"` // degrees counter-clockwise, applied first
 	Rotation   int       `json:"rotation,omitempty"`   // clockwise: 0, 90, 180, 270
 	Crop       *Crop     `json:"crop,omitempty"`       // nil = whole page
 	Brightness int       `json:"brightness,omitempty"` // -100..100
@@ -41,8 +44,15 @@ type Edits struct {
 	Color      ColorMode `json:"color,omitempty"`      // empty = color
 }
 
+// MaxStraighten is the largest straightening angle, either way. Sheets
+// feed in at most a few degrees off; anything more is a rotation.
+const MaxStraighten = 10.0
+
 // Validate checks the edits against a page of the given decoded size.
 func (e Edits) Validate(width, height int) error {
+	if math.IsNaN(e.Straighten) || math.Abs(e.Straighten) > MaxStraighten {
+		return fmt.Errorf("straighten must be between -%g and %g degrees, got %g", MaxStraighten, MaxStraighten, e.Straighten)
+	}
 	switch e.Rotation {
 	case 0, 90, 180, 270:
 	default:
@@ -79,6 +89,19 @@ func (e Edits) WithRotation(rotation, width, height int) Edits {
 
 func (c Crop) rect() image.Rectangle { return image.Rect(c.X, c.Y, c.X+c.W, c.Y+c.H) }
 
+// scaled is e for the same page resized by f.
+func (e Edits) scaled(f float64) Edits {
+	if c := e.Crop; c != nil {
+		e.Crop = &Crop{
+			X: int(math.Floor(float64(c.X) * f)),
+			Y: int(math.Floor(float64(c.Y) * f)),
+			W: max(1, int(math.Round(float64(c.W)*f))),
+			H: max(1, int(math.Round(float64(c.H)*f))),
+		}
+	}
+	return e
+}
+
 func rotatedSize(w, h, rotation int) (int, int) {
 	if rotation == 90 || rotation == 270 {
 		return h, w
@@ -107,14 +130,17 @@ func rotateCrop(c Crop, w, h, rotation int, inverse bool) Crop {
 
 // IsIdentity reports whether rendering would reproduce the original.
 func (e Edits) IsIdentity() bool {
-	return e.Rotation == 0 && e.Crop == nil && e.Brightness == 0 && e.Contrast == 0 &&
+	return e.Straighten == 0 && e.Rotation == 0 && e.Crop == nil && e.Brightness == 0 && e.Contrast == 0 &&
 		(e.Color == "" || e.Color == ColorColor)
 }
 
-// Render applies edits: crop (mapped back to the unrotated frame, so the
-// rotation works on fewer pixels), rotate, tone, then color.
+// Render applies edits: straighten, crop (mapped back to the unrotated
+// frame, so the rotation works on fewer pixels), rotate, tone, then color.
 func Render(img image.Image, e Edits) image.Image {
 	out := img
+	if e.Straighten != 0 {
+		out = straighten(out, e.Straighten)
+	}
 	if c := e.Crop; c != nil {
 		b := img.Bounds()
 		o := rotateCrop(*c, b.Dx(), b.Dy(), e.Rotation, true)
@@ -141,6 +167,17 @@ func Render(img image.Image, e Edits) image.Image {
 		out = toBW(out)
 	}
 	return out
+}
+
+// straighten turns img counter-clockwise by degrees about its center and
+// keeps its size, so crops stay in the same frame. The corners it uncovers
+// are white, like paper.
+func straighten(img image.Image, degrees float64) image.Image {
+	b := img.Bounds()
+	turned := imaging.Rotate(img, degrees, color.White)
+	tb := turned.Bounds()
+	off := image.Pt((tb.Dx()-b.Dx())/2, (tb.Dy()-b.Dy())/2)
+	return imaging.Crop(turned, image.Rectangle{Min: off, Max: off.Add(b.Size())})
 }
 
 func toGray(img image.Image) *image.Gray {
@@ -228,11 +265,21 @@ var Sizes = map[string]image.Point{
 const viewQuality = 82
 
 // RenderView renders a page with its edits, scaled to a preset size, as
-// JPEG for display.
+// JPEG for display. It shrinks the page before applying the edits, so
+// straightening a preview doesn't cost a full-size rotation.
 func RenderView(img image.Image, e Edits, size string) ([]byte, error) {
 	box, ok := Sizes[size]
 	if !ok {
 		return nil, fmt.Errorf("pageimage: unknown size %q", size)
+	}
+	b := img.Bounds()
+	w, h := rotatedSize(b.Dx(), b.Dy(), e.Rotation)
+	if c := e.Crop; c != nil {
+		w, h = c.W, c.H
+	}
+	if f := min(float64(box.X)/float64(w), float64(box.Y)/float64(h)); f < 1 {
+		img = imaging.Resize(img, max(1, int(math.Round(float64(b.Dx())*f))), max(1, int(math.Round(float64(b.Dy())*f))), imaging.Linear)
+		e = e.scaled(float64(img.Bounds().Dx()) / float64(b.Dx()))
 	}
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, Fit(Render(img, e), box.X, box.Y), &jpeg.Options{Quality: viewQuality}); err != nil {

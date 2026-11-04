@@ -157,6 +157,7 @@ function scanStatus(s) {
   if (s.status === 'failed' && s.pageCount === 0) return { text: `Stopped: ${shortError(s.error)}`, tone: 'red' };
   if (s.sent.failed > 0) return { text: 'Couldn’t send', tone: 'red' };
   if (s.sent.total > 0 && s.sent.done === s.sent.total) return { text: 'Filed in Paperless', tone: 'green' };
+  if (s.sent.sending > 0) return { text: 'Sending to Paperless…', tone: '' };
   if (s.sent.total > 0) return { text: 'Sent, waiting for Paperless', tone: '' };
   if (s.status === 'failed') return { text: 'Stopped early · To review', tone: 'orange' };
   return { text: 'To review', tone: 'orange' };
@@ -334,7 +335,8 @@ function tile(scan, page, label) {
 function sentRow(scan, sent) {
   const done = sent.status === 'done';
   const bad = sent.status === 'failed';
-  const text = done ? 'Filed in Paperless' : bad ? (sent.error || 'Paperless couldn’t take it') : sent.status === 'processing' ? 'Paperless is reading it…' : 'Waiting for Paperless…';
+  const waiting = { sending: 'Sending to Paperless…', processing: 'Paperless is reading it…' }[sent.status] || 'Waiting for Paperless…';
+  const text = done ? 'Filed in Paperless' : bad ? (sent.error || 'Paperless couldn’t take it') : waiting;
   return h('div', { class: 'cell' },
     h('span', { class: `sent-icon ${done ? 'done' : bad ? 'failed' : ''}` }, done ? icon('check', 'sm') : bad ? icon('alert', 'sm') : h('span', { class: 'spinner' })),
     h('div', { class: 'main' },
@@ -554,26 +556,32 @@ async function openSend(scan) {
   }
 
   const forms = docs.map((pages, i) => documentForm(scan, pages, i, docs.length, meta));
-  body.replaceChildren(...forms.map((f) => f.el),
-    h('button', { class: 'btn primary big', type: 'button', onclick: submit }, icon('send'), docs.length > 1 ? `Send ${docs.length} documents` : 'Send'));
+  const label = docs.length > 1 ? `Send ${docs.length} documents` : 'Send';
+  const big = h('button', { class: 'btn primary big', type: 'button', onclick: submit }, icon('send'), label);
+  body.replaceChildren(...forms.map((f) => f.el), big);
   send.disabled = false;
   send.addEventListener('click', submit);
 
+  // The scanner answers as soon as it has the documents; building the PDFs
+  // and uploading them carries on there in the background.
   let sending = false;
+  const pending = (on) => {
+    sending = on;
+    send.disabled = big.disabled = on;
+    big.replaceChildren(icon('send'), on ? 'Sending…' : label);
+  };
   async function submit() {
     if (sending) return;
-    sending = true;
-    send.disabled = true;
+    pending(true);
     try {
       state.scan = await api.send(scan.id, forms.map((f) => f.value()));
+      state.scans = await api.scans().catch(() => state.scans);
       sheet.close();
-      const bad = state.scan.sent.slice(-forms.length).filter((s) => s.status === 'failed').length;
-      toast(bad ? `${bad} couldn’t be sent` : docs.length > 1 ? `Sent ${docs.length} documents` : 'Sent to Paperless');
+      toast(docs.length > 1 ? `Sending ${docs.length} documents to Paperless` : 'Sending to Paperless');
       render();
     } catch (e) {
       failed(e);
-      sending = false;
-      send.disabled = false;
+      pending(false);
     }
   }
 }
@@ -916,10 +924,11 @@ function startCrop() {
   const stage = h('div', { class: 'viewer-stage' }, h('div', { class: 'crop-stage' }, img));
   const done = h('button', { type: 'button' }, icon('check'), 'Done');
   const reset = h('button', { type: 'button' }, icon('x'), 'No crop');
+  const auto = h('button', { type: 'button' }, icon('fit'), 'Auto');
   const cancel = h('button', { type: 'button' }, icon('chevron-left'), 'Cancel');
   const el = document.querySelector('.viewer');
   el.querySelector('.viewer-stage').replaceWith(stage);
-  el.querySelector('.toolbar').replaceChildren(cancel, reset, done);
+  el.querySelector('.toolbar').replaceChildren(cancel, reset, auto, done);
   viewer.mode = 'crop';
 
   img.addEventListener('load', () => {
@@ -936,7 +945,10 @@ function startCrop() {
 
   const leave = () => { viewer.cropper && viewer.cropper.destroy(); viewer.cropper = null; viewer.mode = 'view'; drawViewer(); };
   cancel.addEventListener('click', leave);
-  reset.addEventListener('click', async () => { viewer.mode = 'view'; viewer.cropper && viewer.cropper.destroy(); viewer.cropper = null; await editPage({ crop: null }); });
+  const apply = async (patch) => { viewer.mode = 'view'; viewer.cropper && viewer.cropper.destroy(); viewer.cropper = null; if (!await editPage(patch)) drawViewer(); };
+  // No crop shows the page exactly as scanned; Auto goes back to the sheet's edges.
+  reset.addEventListener('click', () => apply({ crop: null, straighten: 0 }));
+  auto.addEventListener('click', () => apply({ autoCrop: true }));
   done.addEventListener('click', async () => {
     if (!viewer.cropper) return;
     const d = viewer.cropper.getData(true);
@@ -1115,8 +1127,8 @@ async function tick() {
       if (state.scan.status === 'running') {
         state.scan = await api.scan(r.id);
         if (viewer && viewer.mode === 'view') drawViewer();
-      } else if (state.paperless && state.paperless.configured && ticks % 3 === 0 && (state.scan.sent || []).some((s) => s.status === 'queued' || s.status === 'processing')) {
-        state.scan = await api.refreshSent(r.id);
+      } else if (ticks % 2 === 0 && (state.scan.sent || []).some((s) => ['sending', 'queued', 'processing'].includes(s.status))) {
+        state.scan = await api.scan(r.id); // the scanner follows Paperless itself
       }
     }
     const listed = r.name === 'home' || r.name === 'scans' || (r.name === 'scan' && sideBySide.matches);

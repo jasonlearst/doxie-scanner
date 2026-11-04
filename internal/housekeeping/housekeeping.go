@@ -6,6 +6,7 @@ package housekeeping
 import (
 	"context"
 	"log"
+	"slices"
 	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/paperless"
@@ -35,6 +36,47 @@ type Keeper struct {
 
 func pending(s storage.SentDocument) bool {
 	return s.TaskID != "" && (s.Status == paperless.TaskQueued || s.Status == paperless.TaskProcessing)
+}
+
+// Waiting reports whether any of a job's documents is still on its way:
+// being handed to Paperless, or handed over and not yet filed.
+func Waiting(m storage.JobMeta) bool {
+	for _, s := range m.Sent {
+		if s.Status == storage.SentSending || pending(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrInterrupted is recorded for documents the app stopped before it
+// finished handing them to Paperless.
+const ErrInterrupted = "the scanner app restarted before this reached Paperless: send it again"
+
+// FailInterrupted marks documents left mid-send by an earlier run as
+// failed, so they can be sent again. Call it before serving requests.
+func (k *Keeper) FailInterrupted() {
+	jobs, err := k.Store.ListJobs()
+	if err != nil {
+		log.Printf("housekeeping: %v", err)
+		return
+	}
+	for _, job := range jobs {
+		if !slices.ContainsFunc(job.Sent, func(s storage.SentDocument) bool { return s.Status == storage.SentSending }) {
+			continue
+		}
+		_, err := k.Store.UpdateMeta(job.ID, func(m *storage.JobMeta) error {
+			for i := range m.Sent {
+				if m.Sent[i].Status == storage.SentSending {
+					m.Sent[i].Status, m.Sent[i].Error = paperless.TaskFailed, ErrInterrupted
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Printf("housekeeping: %s: %v", job.ID, err)
+		}
+	}
 }
 
 // RefreshSent asks Paperless about a job's pending uploads and records
@@ -89,10 +131,10 @@ func Imported(m storage.JobMeta) (time.Time, bool) {
 	}
 	filedPages := map[string]bool{}
 	var last time.Time
+	if Waiting(m) {
+		return time.Time{}, false
+	}
 	for _, s := range m.Sent {
-		if pending(s) {
-			return time.Time{}, false
-		}
 		if s.Status != paperless.TaskDone {
 			continue
 		}
