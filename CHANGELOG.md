@@ -5,6 +5,42 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/) — tags look
 like `v1.2.0`, and each one gets its own section below.
 
+## [2.2.0] - 2026-11-11
+
+### Added
+
+- Pages can be dragged into order. *Reorder pages*, in a scan's More
+  menu, lists the visible pages between their document dividers. Drag a
+  page by its handle with a finger or a mouse, or move it with the
+  arrow keys. Dropping a page next to a divider moves it into the
+  document on that side, and a hidden blank back moves with its page.
+- Two scans can be combined into one before sending, for a stack that
+  went through as two scans after a jam or through two feeders.
+  *Combine with another scan*, in the More menu, puts the older scan's
+  pages first and keeps each scan's documents and edits, then removes
+  the other scan. Scans that have been sent can't be combined.
+- The viewer's page menu has *Move to start* and *Move to end*.
+- `POST /api/scans/{id}/pages/{page}/move` and
+  `POST /api/scans/{id}/combine` do the same through the API, and
+  `GET /api/scans/{id}` returns how much ink was found on each back.
+
+### Changed
+
+- *Move earlier* and *Move later* step over hidden pages in one tap.
+
+### Fixed
+
+- With Sides on Auto, a back with a little print on it, such as a few
+  lines in one corner or a pen note, was hidden as blank. A back is now
+  kept when any part of it has print. A blank back with punch holes may
+  now be kept too.
+- The front and back of a card fed through the front tray came out
+  with different crops, and the back wasn't straightened. Both sides
+  now crop to the card. When one side of a sheet misses an edge or its
+  tilt, it takes them from the other side. Scans made before this
+  release keep their crop.
+- Deleting a page in the viewer could jump to a hidden page.
+
 ## [2.1.0] - 2026-11-04
 
 ### Added
