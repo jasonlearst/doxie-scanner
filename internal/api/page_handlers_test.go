@@ -411,15 +411,16 @@ func TestMovePage_Rejections(t *testing.T) {
 	}
 }
 
+// The PDF writes its images in no fixed order, so pages are told apart by
+// height: at 300 dpi, 90, 96 and 102 px are 21.60, 23.04 and 24.48 pt.
 func TestMovePage_SendsInTheNewOrder(t *testing.T) {
 	store := storage.New(t.TempDir())
-	seedJob(t, store, "job1", seedPage{id: "001f"}, seedPage{id: "002f"}, seedPage{id: "003f"})
-	originals := map[string][]byte{}
-	for i, id := range []string{"001f", "002f", "003f"} {
-		originals[id] = jpegBytes(t, stripes(6+3*i))
-		if err := store.SavePageFile("job1", id+".jpg", originals[id]); err != nil {
-			t.Fatal(err)
-		}
+	meta := seedJob(t, store, "job1", seedPage{id: "001f"}, seedPage{id: "002f"}, seedPage{id: "003f"})
+	for i := range meta.Pages {
+		meta.Pages[i].HeightPx = 90 + 6*i
+	}
+	if err := store.SaveMeta(meta); err != nil {
+		t.Fatal(err)
 	}
 	srv, fake := paperlessServer(t, store)
 	if rec := movePage(srv, "003f", map[string]string{"before": "001f"}); rec.Code != http.StatusOK {
@@ -431,8 +432,8 @@ func TestMovePage_SendsInTheNewOrder(t *testing.T) {
 		t.Fatalf("uploads: %d", len(fake.uploads))
 	}
 	pdf := fake.uploads[0].pdf
-	at := func(id string) int { return bytes.Index(pdf, originals[id]) }
-	if !(at("003f") >= 0 && at("003f") < at("001f") && at("001f") < at("002f")) {
-		t.Errorf("pages at %d, %d, %d: want 003f, 001f, 002f in that order", at("003f"), at("001f"), at("002f"))
+	at := func(height string) int { return bytes.Index(pdf, []byte("/MediaBox [0 0 14.40 "+height+"]")) }
+	if !(at("24.48") >= 0 && at("24.48") < at("21.60") && at("21.60") < at("23.04")) {
+		t.Errorf("pages at %d, %d, %d: want 003f, 001f, 002f in that order", at("24.48"), at("21.60"), at("23.04"))
 	}
 }
