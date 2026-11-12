@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
+	"github.com/andiapps-dev/doxie-scanner/internal/storage"
 )
 
 func TestPageImage_RendersCachesAndRevalidates(t *testing.T) {
@@ -326,5 +327,113 @@ func TestEditPage_AutoCropWithNoBackingShowing(t *testing.T) {
 	rec, _ := editPage(t, srv, map[string]any{"autoCrop": true})
 	if rec.Code != http.StatusUnprocessableEntity || !bytes.Contains(rec.Body.Bytes(), []byte("nothing to crop")) {
 		t.Errorf("status %d %s, want 422 saying there's nothing to crop", rec.Code, rec.Body)
+	}
+}
+
+// Documents: 001f 002f (001b is 001f's hidden back) | 003f | 004f.
+func movingServer(t *testing.T) (*Server, *storage.Store) {
+	t.Helper()
+	srv, store := newTestServer(t, &fakeDriver{})
+	seedJob(t, store, "job1", seedPage{id: "001f"}, seedPage{id: "001b", hidden: true}, seedPage{id: "002f"}, seedPage{id: "003f"}, seedPage{id: "004f"})
+	if rec := do(srv, http.MethodPatch, "/api/scans/job1", map[string]any{"splits": []string{"003f", "004f"}}); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code)
+	}
+	return srv, store
+}
+
+func movePage(srv *Server, page string, body any) *httptest.ResponseRecorder {
+	return do(srv, http.MethodPost, "/api/scans/job1/pages/"+page+"/move", body)
+}
+
+func TestMovePage(t *testing.T) {
+	cases := []struct {
+		name, page string
+		body       map[string]string
+		want       string
+	}{
+		{"after", "001f", map[string]string{"after": "002f"}, "002f 001f 001b- |003f |004f"},
+		{"before", "002f", map[string]string{"before": "001f"}, "002f 001f 001b- |003f |004f"},
+		{"to the start", "004f", map[string]string{"before": "001f"}, "004f 001f 001b- 002f |003f"},
+		{"to the end", "001f", map[string]string{"after": "004f"}, "002f |003f |004f 001f 001b-"},
+		{"just below a divider starts that document", "002f", map[string]string{"before": "003f"}, "001f 001b- |002f 003f |004f"},
+		{"just above a divider ends that document", "004f", map[string]string{"after": "002f"}, "001f 001b- 002f 004f |003f"},
+		{"emptying a document removes it", "004f", map[string]string{"before": "003f"}, "001f 001b- 002f |004f 003f"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, _ := movingServer(t)
+			rec := movePage(srv, c.page, c.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d %s", rec.Code, rec.Body)
+			}
+			if got := layoutOf(decode[jobDetailResponse](t, rec)); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+			if got := layoutOf(decode[jobDetailResponse](t, do(srv, http.MethodGet, "/api/scans/job1", nil))); got != c.want {
+				t.Errorf("saved %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestMovePage_Rejections(t *testing.T) {
+	srv, _ := movingServer(t)
+	const before = "001f 001b- 002f |003f |004f"
+	cases := []struct {
+		page string
+		body any
+		want int
+	}{
+		{"001f", "{", http.StatusBadRequest},
+		{"001f", map[string]string{}, http.StatusBadRequest},
+		{"001f", map[string]string{"after": "002f", "before": "003f"}, http.StatusBadRequest},
+		{"001f", map[string]string{"after": "zzz"}, http.StatusBadRequest},
+		{"002f", map[string]string{"after": "001b"}, http.StatusBadRequest},
+		{"002f", map[string]string{"before": "002f"}, http.StatusBadRequest},
+		{"001b", map[string]string{"after": "004f"}, http.StatusBadRequest},
+		{"999f", map[string]string{"after": "001f"}, http.StatusNotFound},
+	}
+	for _, c := range cases {
+		if rec := movePage(srv, c.page, c.body); rec.Code != c.want {
+			t.Errorf("move %s %v: status %d, want %d", c.page, c.body, rec.Code, c.want)
+		}
+	}
+	if rec := do(srv, http.MethodPost, "/api/scans/nope/pages/001f/move", map[string]string{"after": "002f"}); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown scan: %d", rec.Code)
+	}
+	if got := layoutOf(decode[jobDetailResponse](t, do(srv, http.MethodGet, "/api/scans/job1", nil))); got != before {
+		t.Errorf("a refused move changed the scan: %q", got)
+	}
+
+	running, _, id, _ := runningServer(t)
+	if rec := do(running, http.MethodPost, "/api/scans/"+id+"/pages/001f/move", map[string]string{"after": "002f"}); rec.Code != http.StatusConflict {
+		t.Errorf("still scanning: %d", rec.Code)
+	}
+}
+
+// The PDF writes its images in no fixed order, so pages are told apart by
+// height: at 300 dpi, 90, 96 and 102 px are 21.60, 23.04 and 24.48 pt.
+func TestMovePage_SendsInTheNewOrder(t *testing.T) {
+	store := storage.New(t.TempDir())
+	meta := seedJob(t, store, "job1", seedPage{id: "001f"}, seedPage{id: "002f"}, seedPage{id: "003f"})
+	for i := range meta.Pages {
+		meta.Pages[i].HeightPx = 90 + 6*i
+	}
+	if err := store.SaveMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	srv, fake := paperlessServer(t, store)
+	if rec := movePage(srv, "003f", map[string]string{"before": "001f"}); rec.Code != http.StatusOK {
+		t.Fatalf("move: %d %s", rec.Code, rec.Body)
+	}
+
+	sendAsShown(t, srv, store, "job1")
+	if len(fake.uploads) != 1 {
+		t.Fatalf("uploads: %d", len(fake.uploads))
+	}
+	pdf := fake.uploads[0].pdf
+	at := func(height string) int { return bytes.Index(pdf, []byte("/MediaBox [0 0 14.40 "+height+"]")) }
+	if !(at("24.48") >= 0 && at("24.48") < at("21.60") && at("21.60") < at("23.04")) {
+		t.Errorf("pages at %d, %d, %d: want 003f, 001f, 002f in that order", at("24.48"), at("21.60"), at("23.04"))
 	}
 }

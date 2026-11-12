@@ -3,6 +3,7 @@
 :root {
   --bg: #f2f2f7;
   --cell: #ffffff;
+  --cell-raised: #ffffff;
   --cell-pressed: #d1d1d6;
   --fill: rgba(118, 118, 128, 0.12);
   --label: #000000;
@@ -32,6 +33,7 @@
   :root {
     --bg: #000000;
     --cell: #1c1c1e;
+    --cell-raised: #2c2c2e;
     --cell-pressed: #3a3a3c;
     --fill: rgba(118, 118, 128, 0.24);
     --label: #ffffff;
@@ -152,6 +154,8 @@ a { color: var(--tint); text-underline-offset: 2px; }
 .cell.indent + .cell.indent::before { left: 72px; }
 a.cell, button.cell { cursor: pointer; }
 a.cell:active, button.cell:active { background: var(--cell-pressed); }
+button.cell[disabled] { cursor: default; background: none; color: color-mix(in srgb, var(--label-2) 60%, transparent); }
+button.cell[disabled] .title { color: inherit; }
 .cell .main { flex: 1; min-width: 0; }
 .cell .title { font-size: 17px; line-height: 22px; overflow-wrap: anywhere; }
 .cell .subtitle { font-size: 15px; line-height: 20px; color: var(--label-2); margin-top: 1px; }
@@ -237,6 +241,30 @@ span.thumb .icon { width: 22px; height: 22px; }
 .split-list { border-radius: 12px; overflow: hidden; }
 .split-list .split-row:first-child { border-radius: 12px 12px 0 0; }
 .split-list .split-row:last-child { border-radius: 0 0 12px 12px; }
+
+/* Reorder mode: split mode's rows, with a drag handle at the trailing edge */
+.reorder-list { border-radius: 12px; overflow: hidden; background: var(--cell); }
+.reorder-list.sorting > * { transition: transform 0.2s var(--ease); }
+.reorder-list .reorder-row { position: relative; display: flex; align-items: center; gap: 14px; padding: 8px 4px 8px 16px; background: var(--cell); }
+.reorder-list .reorder-row + .reorder-row::before { content: ""; position: absolute; top: 0; left: 78px; right: 0; border-top: 0.5px solid var(--separator); }
+.reorder-list .reorder-row img { width: 48px; height: 62px; object-fit: contain; border-radius: 3px; box-shadow: var(--page-shadow); background: var(--cell); }
+.reorder-list .reorder-row .main { flex: 1; min-width: 0; }
+.reorder-list .reorder-row .subtitle { color: var(--label-2); font-size: 15px; }
+/* Shadows vanish on black, so a lifted row also takes the raised tone. */
+.reorder-list .reorder-row.dragging { z-index: 2; background: var(--cell-raised); box-shadow: var(--shadow-raised); transition: none; }
+.reorder-list .reorder-row.dragging::before { opacity: 0; }
+.reorder-list .reorder-row.dragging + .reorder-row::before { opacity: 0; }
+.reorder-list .divider {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 44px; background: var(--bg); color: var(--label-2); font-size: 15px;
+}
+.reorder-list .divider::before, .reorder-list .divider::after { content: ""; flex: 1; max-width: 60px; border-top: 0.5px solid var(--separator); }
+.handle {
+  display: grid; place-items: center; flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px;
+  background: none; color: var(--label-2); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+body.dragging-page, body.dragging-page * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* Action bar */
 .actionbar {
