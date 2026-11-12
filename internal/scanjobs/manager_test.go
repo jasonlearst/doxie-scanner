@@ -8,7 +8,9 @@ import (
 	"image/color"
 	"image/draw"
 	"image/jpeg"
+	"math"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/andiapps-dev/doxie-scanner/internal/driver"
 	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
+	"github.com/disintegration/imaging"
 )
 
 func page(c color.Color, w, h int) *image.NRGBA {
@@ -196,7 +199,7 @@ func TestScan_AutoSidesHidesBlankBacksButKeepsThem(t *testing.T) {
 
 // narrowSheet is a sheet narrower than the scanner, on its gray backing.
 func narrowSheet(printed bool) *image.NRGBA {
-	img := page(color.NRGBA{176, 178, 177, 255}, 600, 800)
+	img := page(backing, 600, 800)
 	draw.Draw(img, image.Rect(60, 0, 540, 800), &image.Uniform{color.White}, image.Point{}, draw.Src)
 	if printed {
 		for y := 60; y < 740; y += 20 {
@@ -221,6 +224,85 @@ func TestScan_CropsToTheSheetAndHidesItsBlankBack(t *testing.T) {
 	}
 	if f := meta.Pages[0]; f.Blank {
 		t.Error("the printed front is not blank")
+	}
+}
+
+var backing = color.NRGBA{176, 178, 177, 255}
+
+// withStrip paints, down a scan's left side, the strip darker than the
+// backing seen on the back of a card fed through the front tray.
+func withStrip(img *image.NRGBA, l ...uint8) *image.NRGBA {
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x, v := range l {
+			img.SetNRGBA(x, y, color.NRGBA{v, v, v, 255})
+		}
+	}
+	return img
+}
+
+func TestScan_ADarkStripBesideTheBackKeepsItTheFrontsSize(t *testing.T) {
+	back := side(t, withStrip(narrowSheet(false), 124, 140, 165))
+	_, meta, _ := scan(t, storage.ScanSettings{Sides: SidesAuto}, sheet(side(t, narrowSheet(true)), &back))
+
+	f, b := meta.Pages[0].Edits.Crop, meta.Pages[1].Edits.Crop
+	if f == nil || b == nil || b.X < 58 || b.X > 66 || b.W < f.W-6 || b.W > f.W+6 {
+		t.Fatalf("front crop %+v, back crop %+v, want the back cropped to the sheet at the front's width", f, b)
+	}
+	if !meta.Pages[1].Hidden {
+		t.Error("the blank back, judged inside its crop, should be hidden")
+	}
+}
+
+// card is a card on the scanner's backing, with backing on all four sides,
+// turned clockwise by tilt degrees.
+func card(tilt float64) *image.NRGBA {
+	img := page(backing, 600, 800)
+	sin, cos := math.Sincos(tilt * math.Pi / 180)
+	for y := range 800 {
+		for x := range 600 {
+			dx, dy := float64(x)-300, float64(y)-400
+			if math.Abs(dx*cos+dy*sin) <= 200 && math.Abs(-dx*sin+dy*cos) <= 300 {
+				img.SetNRGBA(x, y, color.NRGBA{240, 240, 238, 255})
+			}
+		}
+	}
+	return img
+}
+
+func TestScan_ABackMissingAnEdgeTakesTheFrontsWidthAndTilt(t *testing.T) {
+	front := card(1.5)
+	back := withStrip(card(0), slices.Repeat([]uint8{60}, 40)...)
+	backSide := side(t, back)
+	_, meta, _ := scan(t, storage.ScanSettings{Sides: SidesDouble}, sheet(side(t, front), &backSide))
+
+	if own, ok := pageimage.DetectPaper(back); !ok || own.Straighten != 0 || own.Crop.X > 0 {
+		t.Fatalf("on its own the back should keep the scan's left side and come out unstraightened: %+v", own)
+	}
+	f, b := meta.Pages[0].Paper, meta.Pages[1].Paper
+	if f == nil || b == nil || f.Straighten == 0 {
+		t.Fatalf("front %+v, back %+v", f, b)
+	}
+	if b.Crop.W != f.Crop.W || b.Straighten != -f.Straighten {
+		t.Errorf("back %+v, want the front's width and its tilt reversed, from %+v", b, f)
+	}
+	if c := meta.Pages[1].Edits.Crop; c == nil || *c != b.Crop || meta.Pages[1].Edits.Straighten != b.Straighten {
+		t.Errorf("the back's edits %+v should apply its paper %+v", meta.Pages[1].Edits, b)
+	}
+}
+
+func TestScan_SidesThatFindEveryEdgeKeepTheirOwnCrops(t *testing.T) {
+	front, back := side(t, card(1.5)), side(t, imaging.FlipH(card(1.5)))
+	_, meta, _ := scan(t, storage.ScanSettings{Sides: SidesDouble}, sheet(front, &back))
+
+	for i, s := range []driver.Side{front, back} {
+		img, err := pageimage.Decode(s.JPEG, s.XDPI, s.YDPI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		own, ok := pageimage.DetectPaper(img)
+		if p := meta.Pages[i].Paper; !ok || p == nil || *p != own {
+			t.Errorf("%s: paper %+v, want %+v as found on its own", meta.Pages[i].ID, p, own)
+		}
 	}
 }
 
