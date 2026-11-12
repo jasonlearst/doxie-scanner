@@ -456,7 +456,11 @@ func (m *Manager) addSide(jobID string, sheet int, side string, s driver.Side, s
 		page.Paper = &paper
 		page.Edits = paper.Apply(page.Edits, page.WidthPx, page.HeightPx)
 	}
-	page.Blank = side == "back" && pageimage.IsBlankPaper(img, page.Edits)
+	if side == "back" {
+		ink := pageimage.MeasureInk(img, page.Edits)
+		page.Ink = &ink
+		page.Blank = ink.Blank()
+	}
 	page.Hidden = page.Blank && settings.Sides == SidesAuto
 
 	page.Edits.Color = pageimage.ColorMode(settings.Color)

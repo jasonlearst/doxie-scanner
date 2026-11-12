@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 )
 
 func TestStore_CheckWritable_CreatesAndVerifies(t *testing.T) {
@@ -130,6 +132,29 @@ func TestStore_LoadMeta_CorruptJSON(t *testing.T) {
 	}
 	if _, err := s.LoadMeta("job1"); err == nil {
 		t.Fatal("expected an error for corrupt JSON")
+	}
+}
+
+func TestStore_LoadMeta_PagesWithAndWithoutInk(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
+		t.Fatal(err)
+	}
+	before := `{"id":"job1","status":"completed","pages":[{"id":"001b","file":"001b.jpg","sheet":1,"side":"back","blank":true,"hidden":true,"edits":{}}]}`
+	if err := os.WriteFile(s.metaPath("job1"), []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LoadMeta("job1")
+	if err != nil || len(got.Pages) != 1 || got.Pages[0].Ink != nil || !got.Pages[0].Hidden {
+		t.Fatalf("a scan saved before ink was recorded: %+v, %v", got, err)
+	}
+
+	got.Pages[0].Ink = &pageimage.Ink{Sheet: 0.0179, Densest: 0.193}
+	if err := s.SaveMeta(got); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := s.LoadMeta("job1"); err != nil || again.Pages[0].Ink == nil || *again.Pages[0].Ink != *got.Pages[0].Ink {
+		t.Errorf("ink didn't round-trip: %+v, %v", again.Pages[0].Ink, err)
 	}
 }
 
