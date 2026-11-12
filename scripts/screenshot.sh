@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Screenshots a page in headless Chrome, so checking the web app opens no window on the user's screen.
 # The page loads in an iframe of the requested size: headless Chrome's window is never narrower than 500px.
-# A worktree session can run this as a plain command; its guard refuses Chrome's path, which has spaces in it.
 # Usage: scripts/screenshot.sh <url> <width> <light|dark> <out.png> [height]
 set -euo pipefail
 

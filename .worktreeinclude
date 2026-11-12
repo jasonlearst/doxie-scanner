@@ -1,2 +1,3 @@
+# Git-ignored files that /worktree copies into a new worktree, one path or glob per line.
 .env
 .env.local
