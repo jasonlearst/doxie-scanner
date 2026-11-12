@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"slices"
 	"sync"
 	"time"
@@ -407,15 +408,28 @@ type scannedSheet struct {
 }
 
 // addSheet adds a scanned sheet's sides to the job and checkpoints it.
+// Both sides are decoded before either is finished, so each can fill in
+// what it missed of the sheet from the other.
 func (m *Manager) addSheet(meta *storage.JobMeta, s scannedSheet) error {
-	front, err := m.addSide(meta.ID, s.number, "front", s.page.Front, meta.Settings)
+	front, frontImg, err := m.storeSide(meta.ID, s.number, "front", s.page.Front)
 	if err != nil {
 		return err
 	}
-	meta.Pages = append(meta.Pages, front)
+	var back storage.PageMeta
+	var backImg image.Image
 	if s.page.Back != nil {
-		back, err := m.addSide(meta.ID, s.number, "back", *s.page.Back, meta.Settings)
-		if err != nil {
+		if back, backImg, err = m.storeSide(meta.ID, s.number, "back", *s.page.Back); err != nil {
+			return err
+		}
+	}
+
+	frontPaper, backPaper := pageimage.DetectSheet(frontImg, backImg)
+	if err := m.finishSide(meta.ID, &front, frontImg, frontPaper, meta.Settings); err != nil {
+		return err
+	}
+	meta.Pages = append(meta.Pages, front)
+	if backImg != nil {
+		if err := m.finishSide(meta.ID, &back, backImg, backPaper, meta.Settings); err != nil {
 			return err
 		}
 		meta.Pages = append(meta.Pages, back)
@@ -429,11 +443,8 @@ func (m *Manager) addSheet(meta *storage.JobMeta, s scannedSheet) error {
 	return nil
 }
 
-// addSide stores the scanner's JPEG untouched, then decodes it once to
-// find the sheet in it (crop and straighten), judge blankness and color,
-// and pre-render the thumbnail the UI shows first. A blank back is hidden, never discarded, and only when the user
-// chose Auto sides: a back with only a signature can look blank.
-func (m *Manager) addSide(jobID string, sheet int, side string, s driver.Side, settings storage.ScanSettings) (storage.PageMeta, error) {
+// storeSide stores the scanner's JPEG untouched and decodes it.
+func (m *Manager) storeSide(jobID string, sheet int, side string, s driver.Side) (storage.PageMeta, image.Image, error) {
 	pageID := storage.PageID(sheet, side)
 	page := storage.PageMeta{
 		ID:    pageID,
@@ -444,19 +455,26 @@ func (m *Manager) addSide(jobID string, sheet int, side string, s driver.Side, s
 		YDPI:  s.YDPI,
 	}
 	if err := m.store.SavePageFile(jobID, page.File, s.JPEG); err != nil {
-		return page, err
+		return page, nil, err
 	}
-
 	img, err := pageimage.Decode(s.JPEG, s.XDPI, s.YDPI)
 	if err != nil {
-		return page, fmt.Errorf("scanjobs: sheet %d %s: %w", sheet, side, err)
+		return page, nil, fmt.Errorf("scanjobs: sheet %d %s: %w", sheet, side, err)
 	}
 	page.WidthPx, page.HeightPx = img.Bounds().Dx(), img.Bounds().Dy()
-	if paper, found := pageimage.DetectPaper(img); found {
-		page.Paper = &paper
+	return page, img, nil
+}
+
+// finishSide crops and straightens a side to the sheet found in it, judges
+// blankness and color, and pre-renders the thumbnail the UI shows first.
+// A blank back is hidden, never discarded, and only when the user chose
+// Auto sides: a back with only a signature can look blank.
+func (m *Manager) finishSide(jobID string, page *storage.PageMeta, img image.Image, paper *pageimage.Paper, settings storage.ScanSettings) error {
+	if paper != nil {
+		page.Paper = paper
 		page.Edits = paper.Apply(page.Edits, page.WidthPx, page.HeightPx)
 	}
-	if side == "back" {
+	if page.Side == "back" {
 		ink := pageimage.MeasureInk(img, page.Edits)
 		page.Ink = &ink
 		page.Blank = ink.Blank()
@@ -470,10 +488,10 @@ func (m *Manager) addSide(jobID string, sheet int, side string, s driver.Side, s
 
 	thumb, err := pageimage.RenderView(img, page.Edits, "thumb")
 	if err != nil {
-		return page, err
+		return err
 	}
-	_ = m.store.SaveRender(jobID, pageID, pageimage.CacheKey(page.Edits, "thumb"), thumb) // a cache miss later just re-renders
-	return page, nil
+	_ = m.store.SaveRender(jobID, page.ID, pageimage.CacheKey(page.Edits, "thumb"), thumb) // a cache miss later just re-renders
+	return nil
 }
 
 // finish records a job's terminal state, both in the persisted metadata

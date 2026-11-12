@@ -30,6 +30,7 @@ const (
 	backingChroma     = 24   // the backing is neutral gray...
 	backingTolerance  = 22   // ...within this of its measured brightness
 	defaultBacking    = 176  // what it measures when no strip shows
+	edgeStrip         = 4    // pixels at the scan's edge, about 1 mm, that may be unlike the backing inside them
 	edgeRun           = 3    // pixels in a row unlike the backing that mark the sheet's edge
 	edgeSearch        = 0.45 // how far in from each side to look
 	minEdgeShare      = 0.15 // share of rows or columns that must show an edge to trust it
@@ -39,84 +40,174 @@ const (
 	minPaperShare     = 0.2  // smallest sheet, as a share of the scan's width and height
 )
 
+// The sheet's edges, in the order detection keeps them.
+const (
+	edgeLeft = iota
+	edgeRight
+	edgeTop
+	edgeBottom
+)
+
 // DetectPaper finds the sheet in a scan by where the scanner's backing
 // ends, and reports how far to straighten it and where to crop. It
 // reports false when there is nothing to change: no backing shows, or the
 // sheet already fills the scan.
 func DetectPaper(img image.Image) (Paper, bool) {
+	return detect(img).ownPaper()
+}
+
+// DetectSheet finds the sheet in the front and back of a two-sided scan,
+// each as DetectPaper does, and returns nil for a side with nothing to
+// change. A side that found only one of its left and right edges, where
+// the other side found both, then takes the other side's width, anchored
+// on the edge it found, and likewise for height. If such a side came out
+// unstraightened, it takes the other side's tilt reversed, as the back is
+// the front's mirror image. Nothing a side found itself is overridden.
+// back is nil for a sheet scanned on one side.
+func DetectSheet(front, back image.Image) (frontPaper, backPaper *Paper) {
+	f := detect(front)
+	if back == nil {
+		return f.beside(nil), nil
+	}
+	b := detect(back)
+	return f.beside(b), b.beside(f)
+}
+
+// detection is what a side of a scan shows of the sheet: the edges where
+// the backing showed beside it, and how far it is tilted.
+type detection struct {
+	g             *grid
+	top, bottom   int          // grid rows the sheet is looked for between
+	edges         [4]*edgeLine // by edgeLeft..edgeBottom; ok where found
+	tilt          float64      // degrees, 0 when it's too small or too large to straighten
+	width, height int          // the scan's size
+}
+
+// detect returns nil for a scan too small to find a sheet in.
+func detect(img image.Image) *detection {
 	b := img.Bounds()
 	g := newGrid(img)
 	top, bottom := g.startLine(), g.h
 	if bottom-top < 10 || g.w < 10 {
-		return Paper{}, false
+		return nil
 	}
-	left, right, upper, lower := g.edges(top, bottom)
-
-	minRows := minEdgeShare * float64(bottom-top)
-	minCols := minEdgeShare * float64(g.w)
-	sides := []struct {
-		e        *edgeLine
-		vertical bool
-		enough   float64
-	}{{left, true, minRows}, {right, true, minRows}, {upper, false, minCols}, {lower, false, minCols}}
+	d := &detection{g: g, top: top, bottom: bottom, edges: g.edges(top, bottom), width: b.Dx(), height: b.Dy()}
 
 	var tilts []weighted
-	for _, s := range sides {
-		if !s.e.fit(s.enough) {
+	for i, e := range d.edges {
+		enough := minEdgeShare * float64(g.w)
+		if vertical(i) {
+			enough = minEdgeShare * float64(bottom-top)
+		}
+		if !e.fit(enough) {
 			continue
 		}
-		deg := math.Atan(s.e.slope) * 180 / math.Pi
-		if s.vertical {
+		deg := math.Atan(e.slope) * 180 / math.Pi
+		if vertical(i) {
 			deg = -deg
 		}
-		tilts = append(tilts, weighted{deg, float64(len(s.e.inliers))})
+		tilts = append(tilts, weighted{deg, float64(len(e.inliers))})
 	}
-	tilt := consensus(tilts)
-	if math.Abs(tilt) < minStraighten || math.Abs(tilt) > maxAutoStraighten {
-		tilt = 0
+	d.tilt = consensus(tilts)
+	if math.Abs(d.tilt) < minStraighten || math.Abs(d.tilt) > maxAutoStraighten {
+		d.tilt = 0
 	}
+	return d
+}
 
-	frame := rect{0, float64(top), float64(g.w), float64(bottom)}
+func vertical(edge int) bool { return edge == edgeLeft || edge == edgeRight }
+
+func (d *detection) found(edge int) bool { return d.edges[edge].ok }
+
+// beside is d's paper, filled in from o, the other side of the same sheet,
+// as DetectSheet describes.
+func (d *detection) beside(o *detection) *Paper {
+	if d == nil {
+		return nil
+	}
+	tilt, size := d.tilt, image.Point{}
+	if op, ok := o.ownPaper(); ok {
+		if d.foundOneOf(edgeLeft, edgeRight) && o.found(edgeLeft) && o.found(edgeRight) {
+			size.X = op.Crop.W
+		}
+		if d.foundOneOf(edgeTop, edgeBottom) && o.found(edgeTop) && o.found(edgeBottom) {
+			size.Y = op.Crop.H
+		}
+		if tilt == 0 && size != (image.Point{}) {
+			tilt = -op.Straighten
+		}
+	}
+	p, ok := d.paper(tilt, size)
+	if !ok {
+		return nil
+	}
+	return &p
+}
+
+func (d *detection) ownPaper() (Paper, bool) {
+	if d == nil {
+		return Paper{}, false
+	}
+	return d.paper(d.tilt, image.Point{})
+}
+
+func (d *detection) foundOneOf(a, b int) bool { return d.found(a) != d.found(b) }
+
+// paper crops to the edges found, with the scan straightened by tilt, and
+// keeps the scan's side where an edge wasn't found. Where size is set, the
+// side found only one of the two edges across it, and the other is placed
+// size away.
+func (d *detection) paper(tilt float64, size image.Point) (Paper, bool) {
+	g := d.g
+	straightened := tilt != 0
 	turn := newTurn(tilt, float64(g.w)/2, float64(g.h)/2)
-	crop := frame
-	found := [4]bool{}
-	if left.ok {
-		crop.x0, found[0] = left.boundary(turn, true, false, tilt != 0), true
+	crop := rect{0, float64(d.top), float64(g.w), float64(d.bottom)}
+	bounds := [4]*float64{&crop.x0, &crop.x1, &crop.y0, &crop.y1}
+	for i, e := range d.edges {
+		if e.ok {
+			*bounds[i] = e.boundary(turn, vertical(i), i == edgeRight || i == edgeBottom, straightened)
+		}
 	}
-	if right.ok {
-		crop.x1, found[1] = right.boundary(turn, true, true, tilt != 0), true
-	}
-	if upper.ok {
-		crop.y0, found[2] = upper.boundary(turn, false, false, tilt != 0), true
-	}
-	if lower.ok {
-		crop.y1, found[3] = lower.boundary(turn, false, true, tilt != 0), true
-	}
-	if tilt != 0 {
-		crop = turn.within(crop, rect{0, float64(top), float64(g.w), float64(g.h)})
+	if straightened {
+		crop = turn.within(crop, rect{0, float64(d.top), float64(g.w), float64(g.h)})
 	}
 
-	sx, sy := float64(b.Dx())/float64(g.w), float64(b.Dy())/float64(g.h)
+	sx, sy := float64(d.width)/float64(g.w), float64(d.height)/float64(g.h)
 	inset := [4]float64{}
-	for i, f := range found {
-		if f {
+	for i := range d.edges {
+		if d.found(i) {
 			inset[i] = math.Ceil(max(sx, sy))
 		}
 	}
-	x0 := int(math.Ceil(crop.x0*sx + inset[0]))
-	x1 := int(math.Floor(crop.x1*sx - inset[1]))
-	y0 := int(math.Ceil(crop.y0*sy + inset[2]))
-	y1 := int(math.Floor(crop.y1*sy - inset[3]))
+	x0 := int(math.Ceil(crop.x0*sx + inset[edgeLeft]))
+	x1 := int(math.Floor(crop.x1*sx - inset[edgeRight]))
+	y0 := int(math.Ceil(crop.y0*sy + inset[edgeTop]))
+	y1 := int(math.Floor(crop.y1*sy - inset[edgeBottom]))
+	x0, x1 = fillIn(x0, x1, size.X, d.found(edgeLeft))
+	y0, y1 = fillIn(y0, y1, size.Y, d.found(edgeTop))
 	x0, y0 = max(x0, 0), max(y0, 0)
-	x1, y1 = min(x1, b.Dx()), min(y1, b.Dy())
+	x1, y1 = min(x1, d.width), min(y1, d.height)
 
-	if float64(x1-x0) < minPaperShare*float64(b.Dx()) || float64(y1-y0) < minPaperShare*float64(b.Dy()) {
+	if float64(x1-x0) < minPaperShare*float64(d.width) || float64(y1-y0) < minPaperShare*float64(d.height) {
 		return Paper{}, false
 	}
-	if tilt == 0 && x0 == 0 && y0 == 0 && x1 == b.Dx() && y1 == b.Dy() {
+	if !straightened && x0 == 0 && y0 == 0 && x1 == d.width && y1 == d.height {
 		return Paper{}, false
 	}
 	return Paper{Straighten: math.Round(tilt*100) / 100, Crop: Crop{X: x0, Y: y0, W: x1 - x0, H: y1 - y0}}, true
+}
+
+// fillIn places the one of two opposite crop edges that wasn't found size
+// away from the one that was, when size is set.
+func fillIn(lo, hi, size int, foundLo bool) (int, int) {
+	switch {
+	case size == 0:
+	case foundLo:
+		hi = lo + size
+	default:
+		lo = hi - size
+	}
+	return lo, hi
 }
 
 // grid holds a downscaled scan's brightness and chroma.
@@ -147,12 +238,18 @@ func newGrid(img image.Image) *grid {
 	return g
 }
 
-// measureBacking takes the backing's brightness from the outermost columns,
-// where it shows beside any sheet narrower than the scanner.
+// measureBacking takes the backing's brightness from the columns near
+// each side, where it shows beside any sheet narrower than the scanner.
+// They lie just inside the scan's outermost columns, which may show a
+// strip unlike the backing.
 func (g *grid) measureBacking() int {
 	var samples []int
+	columns := []int{edgeStrip, edgeStrip + 1, g.w - 2 - edgeStrip, g.w - 1 - edgeStrip}
 	for y := 0; y < g.h; y++ {
-		for _, x := range []int{0, 1, g.w - 2, g.w - 1} {
+		for _, x := range columns {
+			if x < 0 || x >= g.w {
+				continue
+			}
 			i := y*g.w + x
 			if l := int(g.lum[i]); g.chr[i] <= backingChroma && l >= 120 && l <= 215 {
 				samples = append(samples, l)
@@ -189,8 +286,8 @@ func (g *grid) startLine() int {
 
 // edges walks in from each side of every row (and column) that starts on
 // the backing, to where the backing ends.
-func (g *grid) edges(top, bottom int) (left, right, upper, lower *edgeLine) {
-	left, right, upper, lower = &edgeLine{}, &edgeLine{}, &edgeLine{}, &edgeLine{}
+func (g *grid) edges(top, bottom int) [4]*edgeLine {
+	left, right, upper, lower := &edgeLine{}, &edgeLine{}, &edgeLine{}, &edgeLine{}
 	reachX, reachY := int(edgeSearch*float64(g.w)), int(edgeSearch*float64(bottom-top))
 	margin := (bottom - top) / 20
 	for y := top + margin; y < bottom-margin; y++ {
@@ -211,18 +308,23 @@ func (g *grid) edges(top, bottom int) (left, right, upper, lower *edgeLine) {
 			lower.add(at, float64(pos+1))
 		}
 	}
-	return left, right, upper, lower
+	return [4]*edgeLine{left, right, upper, lower}
 }
 
 // walk steps from (x, y) by (dx, dy) and returns the position of the first
 // pixel of the sheet, or false if the walk doesn't start on the backing or
-// never leaves it.
+// never leaves it. The backing may start up to edgeStrip pixels in, behind
+// a strip at the scan's edge, and must show two pixels in a row there, so
+// the blurred inner edge of a strip isn't taken for it.
 func (g *grid) walk(x, y, dx, dy, reach int) (int, bool) {
-	if !g.backingAt(x, y) {
-		return 0, false
+	start := 0
+	for !g.backingAt(x+dx*start, y+dy*start) || !g.backingAt(x+dx*(start+1), y+dy*(start+1)) {
+		if start++; start > edgeStrip {
+			return 0, false
+		}
 	}
 	run := 0
-	for step := 0; step < reach; step++ {
+	for step := start; step < reach; step++ {
 		px, py := x+dx*step, y+dy*step
 		if g.backingAt(px, py) {
 			run = 0

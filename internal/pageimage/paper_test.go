@@ -5,6 +5,8 @@ import (
 	"image/color"
 	"math"
 	"testing"
+
+	"github.com/disintegration/imaging"
 )
 
 // Measured on DX400 scans: the backing beside a narrow sheet, the shadow
@@ -23,15 +25,17 @@ type sheet struct {
 	dx     float64 // its center's offset from the scan's center
 	tilt   float64 // degrees clockwise
 	paper  color.NRGBA
-	inkBar bool // a solid bar of ink along its left edge
-	blank  bool // no text
+	inkBar bool    // a solid bar of ink along its left edge
+	blank  bool    // no text
+	gap    float64 // backing shown above and below it
 }
 
 // scanOf renders what the scanner would deliver for s: the scan is as
-// wide as the scanner and just tall enough for the tilted sheet.
+// wide as the scanner and just tall enough for the tilted sheet and its
+// gap.
 func scanOf(width int, s sheet) (*image.NRGBA, image.Rectangle) {
 	sin, cos := math.Sincos(math.Abs(s.tilt) * math.Pi / 180)
-	height := int(s.w*sin+s.h*cos) + 8
+	height := int(s.w*sin+s.h*cos+2*s.gap) + 8
 	img := tilted(width, height, s.tilt, func(x, y float64) color.Color {
 		x -= s.dx
 		ax, ay := math.Abs(x), math.Abs(y)
@@ -214,5 +218,168 @@ func TestPaperApply_PutsTheCropInTheRotatedFrame(t *testing.T) {
 	}
 	if err := e.Validate(300, 400); err != nil {
 		t.Error(err)
+	}
+}
+
+// Seen on the back of a card fed through the front tray at 300 dpi: a few
+// columns at the scan's edge darker than the backing, the same in every
+// row. Draw it on 2550-pixel-wide scans to keep it its real width.
+var stripAtTheEdge = []uint8{124, 124, 124, 140, 140, 140, 165, 165, 165}
+
+// withStrip paints stripAtTheEdge down img's left or right side, below the
+// start line, outermost column first.
+func withStrip(img *image.NRGBA, right bool) *image.NRGBA {
+	w := img.Rect.Dx()
+	for y := 4; y < img.Rect.Dy(); y++ {
+		for i, l := range stripAtTheEdge {
+			x := i
+			if right {
+				x = w - 1 - i
+			}
+			img.SetNRGBA(x, y, color.NRGBA{l, l, l, 255})
+		}
+	}
+	return img
+}
+
+func TestDetectPaper_DarkStripAtTheScansEdge(t *testing.T) {
+	for name, c := range map[string]struct {
+		dx    float64
+		right bool
+	}{"strip on the left": {50, false}, "strip on the right": {-50, true}} {
+		img, want := scanOf(2550, sheet{w: 590, h: 1030, dx: c.dx, paper: white})
+		got, ok := DetectPaper(withStrip(img, c.right))
+		if !ok {
+			t.Fatalf("%s: no paper found", name)
+		}
+		checkCrop(t, name, got.Crop, want, 6)
+	}
+}
+
+func TestMeasureBacking_IgnoresAStripAtOneSide(t *testing.T) {
+	plain, _ := scanOf(2550, sheet{w: 590, h: 1030, dx: 50, paper: white})
+	want := newGrid(plain).back
+	for _, right := range []bool{false, true} {
+		striped, _ := scanOf(2550, sheet{w: 590, h: 1030, dx: 50, paper: white})
+		if got := newGrid(withStrip(striped, right)).back; !near(got, want, 3) {
+			t.Errorf("strip on the right %v: backing measured %d, %d without the strip", right, got, want)
+		}
+	}
+}
+
+func TestDetectPaper_FullWidthSheetWithAStripKeepsItsSides(t *testing.T) {
+	for _, right := range []bool{false, true} {
+		img, _ := scanOf(2550, sheet{w: 2600, h: 1500, paper: white})
+		got, ok := DetectPaper(withStrip(img, right))
+		if ok && (got.Crop.X > 0 || got.Crop.X+got.Crop.W < 2550 || got.Straighten != 0) {
+			t.Errorf("strip on the right %v: a sheet filling the scanner's width should keep its sides, got %+v", right, got)
+		}
+	}
+}
+
+// A business card: its front, tilted, with backing showing on all four
+// sides, and its back, which the scanner reads as the front's mirror image.
+func cardSides(t *testing.T) (front, back *image.NRGBA) {
+	t.Helper()
+	front, _ = scanOf(2550, sheet{w: 590, h: 1030, dx: 50, tilt: 1, gap: 150, paper: white})
+	d := detect(front)
+	for i := range d.edges {
+		if !d.found(i) {
+			t.Fatalf("the card's front should show all four edges, edge %d not found", i)
+		}
+	}
+	return front, imaging.FlipH(front)
+}
+
+// hideEdge covers one side of a scan, below the start line, with a band
+// too wide and too dark to see the backing past.
+func hideEdge(img *image.NRGBA, edge int) *image.NRGBA {
+	w, h := img.Rect.Dx(), img.Rect.Dy()
+	for y := 4; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if edge == edgeLeft && x < 60 || edge == edgeRight && x >= w-60 || edge == edgeBottom && y >= h-60 {
+				img.SetNRGBA(x, y, color.NRGBA{60, 60, 60, 255})
+			}
+		}
+	}
+	return img
+}
+
+func ownPaper(t *testing.T, img image.Image) *Paper {
+	t.Helper()
+	p, ok := DetectPaper(img)
+	if !ok {
+		t.Fatal("no paper found")
+	}
+	return &p
+}
+
+func TestDetectSheet_SidesThatFindEveryEdgeKeepTheirOwn(t *testing.T) {
+	front, back := cardSides(t)
+	fp, bp := DetectSheet(front, back)
+	if want := ownPaper(t, front); fp == nil || *fp != *want {
+		t.Errorf("front %+v, want %+v as found on its own", fp, want)
+	}
+	if want := ownPaper(t, back); bp == nil || *bp != *want {
+		t.Errorf("back %+v, want %+v as found on its own", bp, want)
+	}
+}
+
+func TestDetectSheet_ASideMissingAnEdgeTakesTheOthersSize(t *testing.T) {
+	for name, c := range map[string]struct {
+		onBack bool
+		edge   int
+	}{"back's left": {true, edgeLeft}, "front's right": {false, edgeRight}, "back's bottom": {true, edgeBottom}} {
+		front, back := cardSides(t)
+		hidden := front
+		if c.onBack {
+			hidden = back
+		}
+		if detect(hideEdge(hidden, c.edge)).found(c.edge) {
+			t.Fatalf("%s: the edge should be lost on its own, or this test proves nothing", name)
+		}
+		fp, bp := DetectSheet(front, back)
+		if fp == nil || bp == nil {
+			t.Fatalf("%s: front %+v, back %+v", name, fp, bp)
+		}
+		if vertical(c.edge) && bp.Crop.W != fp.Crop.W || !vertical(c.edge) && bp.Crop.H != fp.Crop.H {
+			t.Errorf("%s: back %v, front %v, want the same size", name, bp.Crop, fp.Crop)
+		}
+		mirror := image.Rect(2550-(fp.Crop.X+fp.Crop.W), fp.Crop.Y, 2550-fp.Crop.X, fp.Crop.Y+fp.Crop.H)
+		checkCrop(t, name+", the back against the front's mirror", bp.Crop, mirror, 6)
+		if math.Abs(bp.Straighten+fp.Straighten) > 0.15 || fp.Straighten == 0 {
+			t.Errorf("%s: back straighten %.2f°, want the front's %.2f° reversed", name, bp.Straighten, fp.Straighten)
+		}
+	}
+}
+
+func TestDetectSheet_AnUnstraightenedSideTakesTheOthersTiltReversed(t *testing.T) {
+	front, _ := cardSides(t)
+	back, _ := scanOf(2550, sheet{w: 590, h: 1030, dx: -50, gap: 150, paper: white})
+	hideEdge(back, edgeLeft)
+	if own := ownPaper(t, back); own.Straighten != 0 || detect(back).found(edgeLeft) {
+		t.Fatalf("the back should lose its left edge and come out unstraightened on its own: %+v", own)
+	}
+	fp, bp := DetectSheet(front, back)
+	if want := ownPaper(t, front); fp == nil || *fp != *want {
+		t.Errorf("the front found every edge itself and should keep them: %+v, want %+v", fp, want)
+	}
+	if bp == nil || fp == nil || bp.Straighten != -fp.Straighten || bp.Crop.W != fp.Crop.W {
+		t.Errorf("back %+v, want the front's width and its tilt reversed, from %+v", bp, fp)
+	}
+}
+
+func TestDetectSheet_OneSideAlone(t *testing.T) {
+	front, back := cardSides(t)
+	fp, bp := DetectSheet(front, nil)
+	if want := ownPaper(t, front); fp == nil || *fp != *want || bp != nil {
+		t.Errorf("a sheet scanned on one side: front %+v, back %+v, want %+v and nil", fp, bp, want)
+	}
+	fp, bp = DetectSheet(solid(5, 5, white), back)
+	if want := ownPaper(t, back); fp != nil || bp == nil || *bp != *want {
+		t.Errorf("a side too small to look in: front %+v, back %+v, want nil and %+v", fp, bp, want)
+	}
+	if fp, _ = DetectSheet(solid(1275, 1650, white), back); fp != nil {
+		t.Errorf("a side that found no edges takes nothing from the other: front %+v", fp)
 	}
 }
