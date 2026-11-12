@@ -42,10 +42,12 @@ export const api = {
   startScan: (settings) => request('POST', '/api/scans', settings),
   updateScan: (id, patch) => request('PATCH', `/api/scans/${id}`, patch),
   deleteScan: (id) => request('DELETE', `/api/scans/${id}`),
+  combine: (id, from) => request('POST', `/api/scans/${id}/combine`, { from }),
 
   editPage: (id, page, patch) => request('PATCH', `/api/scans/${id}/pages/${page}`, patch),
   deletePage: (id, page) => request('DELETE', `/api/scans/${id}/pages/${page}`),
-  reorder: (id, order) => request('PUT', `/api/scans/${id}/pages/order`, { order }),
+  // where is { after: pageId } or { before: pageId }
+  movePage: (id, page, where) => request('POST', `/api/scans/${id}/pages/${page}/move`, where),
 
   paperless: () => request('GET', '/api/paperless'),
   paperlessMetadata: () => request('GET', '/api/paperless/metadata'),

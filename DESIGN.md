@@ -10,6 +10,7 @@ colors:
   grouped-bg-dark: "#000000"
   cell: "#ffffff"
   cell-dark: "#1c1c1e"
+  cell-raised-dark: "#2c2c2e"
   cell-pressed: "#d1d1d6"
   cell-pressed-dark: "#3a3a3c"
   fill: "rgba(118, 118, 128, 0.12)"
@@ -226,6 +227,7 @@ A grayscale grouped-list world with one accessible blue and three status colors,
 ### Neutral
 - **Grouped Gray** (grouped-bg / grouped-bg-dark): the page ground, sheet ground, viewer ground, and the ground of unselected split dividers.
 - **Cell White / Cell Graphite** (cell / cell-dark): list groups, notices, the laptop sidebar, the viewer toolbar, nav-arrow and badge chips.
+- **Raised Graphite** (cell-raised-dark): a row lifted by a drag in dark appearance, where its shadow can't show on black. In light it stays cell white.
 - **Pressed Gray** (cell-pressed): active state of tappable cells.
 - **Quiet Fill** (fill): translucent gray behind tinted buttons, text fields, segmented tracks, chips, and placeholder thumbnails; also the selected row in the laptop master list and sidebar.
 - **Segment Thumb** (thumb / thumb-dark): the selected segment. White in light; #636366 in dark, so the thumb sits lighter than its track instead of reading as a hole.
@@ -333,6 +335,15 @@ Documents are labeled groups ("Document 1", count and PDF link trailing) of pape
 
 ### Split Mode
 The grid becomes full-width rows (48 × 62px page, "Page N", "Document N"). Between each pair sits a full-width 44px divider on the grouped ground with dashed hairlines either side of "Tap to split here"; an active split is a tint-filled bar with a scissors glyph and "Document N starts here" in white semibold.
+
+### Reorder Mode
+Started from the scan's More menu, it swaps the grid for split mode's rows, visible pages only, each with a 44px ≡ handle in secondary label at the trailing edge. Rows in a document are joined by hairlines inset 78px. Between documents sits a fixed 44px divider on the grouped ground: a scissors glyph and "Document N" in secondary label between solid hairlines. It can't be tapped, so it never takes the tint. The action bar holds only a primary Done. Dragging a handle lifts the row with the raised shadow (and the raised tone in dark), the other rows slide aside with the house ease to open a cell-colored slot, and the page scrolls only while the row reaches under the nav bar or the action bar. Each drop saves at once, and a toast says where the page went ("Moved to page 2, document 1"). Arrow keys on a focused handle step through the same places a drag can drop on.
+
+### Combine Sheet
+From the scan's More menu: a sheet listing the other scans that can join this one, as scan-list rows with the day and time and page count, and "Stopped early" in orange where it applies. Tapping one asks for confirmation in a sheet whose one primary button is Combine. With nothing to combine, the sheet shows an empty state saying why.
+
+### Disabled Menu Rows
+A row that can't be used yet keeps its place in the menu with its icon and title at 60% secondary label, and says why in a normal secondary subtitle ("Needs at least two pages.").
 
 ### Page Viewer
 Full-screen over the grouped ground: top row (plain semibold Done · "Page N of M", or "Hidden page" when paging the hidden set), the page centered with the paper shadow, side arrows from 900px, and a bottom toolbar on the cell color of icon-over-label tint actions (Rotate, Crop, Adjust, Hide/Show, More); a destructive toolbar action takes red. It pages only through the set it was opened in, and after Hide/Show moves to a neighbor. Paging swaps the page in place; only opening the viewer fades it in.

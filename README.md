@@ -31,9 +31,14 @@ web app was rebuilt for phones, and Paperless support was added.
   Hidden pages are kept, so you can bring one back. Color can be color,
   gray, black & white, or *Auto*, which picks per page.
 - **Fix pages:** rotate, crop, brightness, contrast, color mode, hide,
-  delete, reorder. Edits never change the scan itself, so you can always
-  undo them.
+  delete. Edits never change the scan itself, so you can always undo
+  them.
+- **Put pages in order** by dragging them in a list, or a page at a time
+  from the page viewer. A hidden blank back moves with its page.
 - **Split** a stack into several documents by tapping between pages.
+- **Combine two scans** into one, for a stack that went through as two
+  scans after a jam or through two feeders. The older scan's pages come
+  first.
 - **Send to Paperless** with a title, date, correspondent, document type
   and tags picked from your Paperless lists. Anything left blank is up
   to Paperless's own matching rules. The app follows each upload until
@@ -222,7 +227,9 @@ Everything is JSON unless noted. There's no authentication.
 | `GET /api/scans` | All scans, newest first |
 | `GET`, `PATCH`, `DELETE /api/scans/{id}` | One scan; `PATCH` takes `name` and `splits` |
 | `GET /api/scans/{id}/pdf` | PDF download; `?pages=001f,001b` limits it to those pages |
-| `PUT /api/scans/{id}/pages/order` | Reorder pages |
+| `POST /api/scans/{id}/combine` | Move another scan's pages into this one and delete it: `{"from": "<scan id>"}` |
+| `PUT /api/scans/{id}/pages/order` | Set the order of every page, hidden ones included |
+| `POST /api/scans/{id}/pages/{page}/move` | Move a visible page next to another: `{"after": "<page id>"}` or `{"before": "<page id>"}` |
 | `PATCH`, `DELETE /api/scans/{id}/pages/{page}` | Edit (`rotation`, `crop`, `brightness`, `contrast`, `color`, `hidden`) or delete a page |
 | `GET /api/scans/{id}/pages/{page}/image` | Rendered page: `?size=thumb` or `preview`, `&crop=none` |
 | `GET /api/scans/{id}/pages/{page}/original` | The scanner's JPEG, untouched |
