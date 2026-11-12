@@ -9,7 +9,9 @@ package storage
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
@@ -68,10 +70,15 @@ type JobMeta struct {
 	Settings    ScanSettings `json:"settings"`
 	Pages       []PageMeta   `json:"pages"`
 	// Splits are the pages that start a new document when the job is
-	// sent; a split moves with its page when pages are reordered.
+	// sent. A split moves with its page when the whole order is set, but
+	// stays where it is when one page is moved (see MovePage).
 	Splits []string       `json:"splits,omitempty"`
 	Sent   []SentDocument `json:"sent,omitempty"`
 	Error  string         `json:"error,omitempty"`
+	// LastSheet is the highest sheet number a deleted or combined page
+	// has had. Pages added later are numbered above it, so none takes the
+	// ID, and with it the cached image, of a page that's gone.
+	LastSheet int `json:"lastSheet,omitempty"`
 }
 
 // SentDocument records one upload to Paperless and how its consumption
@@ -104,12 +111,188 @@ func (j JobMeta) VisiblePages() []PageMeta {
 
 // FindPage looks a page up by ID, returning its position too.
 func (j JobMeta) FindPage(id string) (PageMeta, int, bool) {
-	for i, p := range j.Pages {
-		if p.ID == id {
-			return p, i, true
-		}
+	if i := pageIndex(j.Pages, id); i >= 0 {
+		return j.Pages[i], i, true
 	}
 	return PageMeta{}, -1, false
+}
+
+func pageIndex(pages []PageMeta, id string) int {
+	return slices.IndexFunc(pages, func(p PageMeta) bool { return p.ID == id })
+}
+
+// ErrPageNotFound means no page of the job has the ID given.
+var ErrPageNotFound = errors.New("page not found")
+
+// highestSheet is the highest sheet number any page of the job has had.
+func (j JobMeta) highestSheet() int {
+	n := j.LastSheet
+	for _, p := range j.Pages {
+		n = max(n, p.Sheet)
+	}
+	return n
+}
+
+// DeletePage removes a page and its split, remembering its sheet so the
+// page's ID is never handed out again.
+func (j *JobMeta) DeletePage(id string) (PageMeta, error) {
+	page, i, ok := j.FindPage(id)
+	if !ok {
+		return page, ErrPageNotFound
+	}
+	j.LastSheet = j.highestSheet()
+	j.Pages = slices.Delete(j.Pages, i, i+1)
+	j.Splits = slices.DeleteFunc(j.Splits, func(s string) bool { return s == id })
+	return page, nil
+}
+
+// Documents are the visible pages' IDs, cut where Splits say.
+func (j JobMeta) Documents() [][]string {
+	var docs [][]string
+	for _, p := range j.Pages {
+		if p.Hidden {
+			continue
+		}
+		if len(docs) == 0 || slices.Contains(j.Splits, p.ID) {
+			docs = append(docs, nil)
+		}
+		docs[len(docs)-1] = append(docs[len(docs)-1], p.ID)
+	}
+	return docs
+}
+
+// attached is the run of pages around pages[i] that travel with it: the
+// hidden pages of its sheet right beside it, such as its blank back.
+func attached(pages []PageMeta, i int) (start, end int) {
+	ofSheet := func(k int) bool { return pages[k].Hidden && pages[k].Sheet == pages[i].Sheet }
+	start, end = i, i+1
+	for start > 0 && ofSheet(start-1) {
+		start--
+	}
+	for end < len(pages) && ofSheet(end) {
+		end++
+	}
+	return start, end
+}
+
+// MovePage puts a visible page right after the visible page target, or
+// right before it, in target's document. Only the moved page changes
+// document: the boundaries stay where they are, and a document left
+// with no pages goes. The page's attached hidden pages move with it.
+// Other hidden pages, and splits on hidden pages, stay as they are.
+func (j *JobMeta) MovePage(id, target string, after bool) error {
+	page, i, ok := j.FindPage(id)
+	if !ok {
+		return ErrPageNotFound
+	}
+	to, _, found := j.FindPage(target)
+	switch {
+	case page.Hidden:
+		return errors.New("a hidden page moves with its sheet's visible page")
+	case !found:
+		return fmt.Errorf("no page %q to move next to", target)
+	case to.Hidden:
+		return errors.New("a page can't be moved next to a hidden page")
+	case target == id:
+		return errors.New("a page can't be moved next to itself")
+	}
+
+	docs := j.Documents()
+	for d := range docs {
+		docs[d] = slices.DeleteFunc(docs[d], func(p string) bool { return p == id })
+	}
+	docs = slices.DeleteFunc(docs, func(doc []string) bool { return len(doc) == 0 })
+	for d, doc := range docs {
+		if k := slices.Index(doc, target); k >= 0 {
+			if after {
+				k++
+			}
+			docs[d] = slices.Insert(doc, k, id)
+		}
+	}
+
+	start, end := attached(j.Pages, i)
+	moving := slices.Clone(j.Pages[start:end])
+	rest := slices.Delete(slices.Clone(j.Pages), start, end)
+	at, tEnd := attached(rest, pageIndex(rest, target))
+	if after {
+		at = tEnd
+	}
+	j.Pages = slices.Insert(rest, at, moving...)
+
+	starts := map[string]bool{}
+	for _, doc := range docs[1:] {
+		starts[doc[0]] = true
+	}
+	splits := make([]string, 0, len(docs)-1)
+	for _, p := range j.Pages {
+		if starts[p.ID] || (p.Hidden && slices.Contains(j.Splits, p.ID)) {
+			splits = append(splits, p.ID)
+		}
+	}
+	j.Splits = splits
+	return nil
+}
+
+// Combine adds the pages of another job, in the order they were scanned:
+// the older job's pages come first. Incoming pages are renumbered above
+// every sheet this job has had, keep their edits and hidden state, and
+// bring their splits; the two parts are one document. The result keeps
+// this job's ID and name and counts as finished. files maps each
+// incoming page's file in from to its file here.
+func (j JobMeta) Combine(from JobMeta) (combined JobMeta, files map[string]string) {
+	used := map[string]bool{}
+	for _, p := range j.Pages {
+		used[p.ID] = true
+	}
+	next := j.highestSheet()
+	sheets := map[int]int{}
+	ids := map[string]string{}
+	files = map[string]string{}
+	incoming := make([]PageMeta, 0, len(from.Pages))
+	for _, p := range from.Pages {
+		side := p.Side
+		if side == "" {
+			side = "front"
+		}
+		sheet, ok := sheets[p.Sheet]
+		for !ok || used[PageID(sheet, side)] {
+			next++
+			sheet, ok = next, true
+		}
+		sheets[p.Sheet] = sheet
+		id := PageID(sheet, side)
+		used[id] = true
+		ids[p.ID] = id
+		files[p.File] = PageFilename(id)
+		p.ID, p.File, p.Sheet = id, PageFilename(id), sheet
+		incoming = append(incoming, p)
+	}
+
+	combined = j
+	combined.LastSheet = next
+	combined.Status, combined.Error = StatusCompleted, ""
+	if from.CompletedAt != nil && (j.CompletedAt == nil || from.CompletedAt.After(*j.CompletedAt)) {
+		combined.CompletedAt = from.CompletedAt
+	}
+	splits := slices.Clone(j.Splits)
+	for _, s := range from.Splits {
+		if id, ok := ids[s]; ok {
+			splits = append(splits, id)
+		}
+	}
+	later := JobMeta{Pages: incoming}
+	if from.CreatedAt.Before(j.CreatedAt) {
+		later = j
+		combined.Pages = append(incoming, j.Pages...)
+	} else {
+		combined.Pages = append(slices.Clone(j.Pages), incoming...)
+	}
+	if visible := later.VisiblePages(); len(visible) > 0 {
+		splits = slices.DeleteFunc(splits, func(s string) bool { return s == visible[0].ID })
+	}
+	combined.Splits = splits
+	return combined, files
 }
 
 // NewJobID returns a human-sortable, collision-resistant job identifier:

@@ -86,6 +86,7 @@ const state = {
   scanError: null,
   paperless: null,
   splitDraft: null,
+  reordering: false,
   hiddenOpen: false,
   starting: false,
   notice: null,
@@ -322,6 +323,45 @@ function documentsOf(scan) {
   return docs;
 }
 
+// A combined scan can hold pages scanned at different resolutions.
+function resolutionLabel(scan, visible) {
+  const dpis = [...new Set(visible.map((p) => p.ydpi))].sort((a, b) => a - b);
+  if (dpis.length < 2) return `${scan.settings.resolution} dpi`;
+  return `${dpis.slice(0, -1).join(', ')} and ${dpis.at(-1)} dpi`;
+}
+
+// Where page id sits: its number among visible pages and its document.
+function placeOf(scan, id) {
+  const docs = documentsOf(scan);
+  let n = 0;
+  for (const [d, pages] of docs.entries()) {
+    const i = pages.findIndex((p) => p.id === id);
+    if (i >= 0) return { page: n + i + 1, doc: d + 1, docs: docs.length };
+    n += pages.length;
+  }
+  return null;
+}
+
+function placeLabel(place) {
+  return place.docs > 1 ? `page ${place.page}, document ${place.doc}` : `page ${place.page}`;
+}
+
+// Moves a visible page next to another, as the server's move rules say,
+// and reports where it ended up.
+async function movePage(scan, id, where) {
+  try {
+    state.scan = await api.movePage(scan.id, id, where);
+    render();
+    const place = placeOf(state.scan, id);
+    if (place) toast(`Moved to ${placeLabel(place)}`);
+    return true;
+  } catch (e) {
+    failed(e);
+    render();
+    return false;
+  }
+}
+
 function tile(scan, page, label) {
   const isNew = !state.seenPages.has(`${scan.id}/${page.id}`);
   state.seenPages.add(`${scan.id}/${page.id}`);
@@ -373,7 +413,7 @@ function viewScan() {
     h('div', { class: 'navbar-title-row' },
       h('div', {},
         h('h2', {}, scan.name),
-        h('p', { class: 'num' }, `${dayLabel(scan.createdAt)}, ${timeLabel(scan.createdAt)} · ${plural(visible.length, 'page')} · ${scan.settings.resolution} dpi`))));
+        h('p', { class: 'num' }, `${dayLabel(scan.createdAt)}, ${timeLabel(scan.createdAt)} · ${plural(visible.length, 'page')} · ${resolutionLabel(scan, visible)}`))));
 
   if (running) {
     page.append(h('div', { class: 'notice blue', role: 'status' }, h('span', { class: 'spinner' }),
@@ -398,6 +438,8 @@ function viewScan() {
 
   if (state.splitDraft) {
     page.append(splitEditor(scan, visible));
+  } else if (state.reordering) {
+    page.append(reorderList(scan, docs));
   } else if (!visible.length && !running) {
     page.append(h('div', { class: 'list' }, h('div', { class: 'empty' }, h('strong', {}, 'No pages'), hidden.length ? 'Every page is hidden. Show the hidden pages below to bring one back.' : 'Nothing was scanned.')));
   } else {
@@ -412,7 +454,7 @@ function viewScan() {
     if (running) page.append(h('div', { class: 'pages', 'aria-hidden': 'true' }, h('div', { class: 'tile placeholder' }, h('span', { class: 'sheet' }), `Page ${n + 1}`)));
   }
 
-  if (hidden.length && !state.splitDraft) {
+  if (hidden.length && !state.splitDraft && !state.reordering) {
     const toggle = h('button', { class: 'cell', type: 'button', 'aria-expanded': String(state.hiddenOpen), onclick: () => { state.hiddenOpen = !state.hiddenOpen; render(); } },
       icon('eye-off'), h('div', { class: 'main' },
         h('div', { class: 'title' }, `${plural(hidden.length, 'hidden page')}`),
@@ -431,6 +473,10 @@ function actionBar(scan, visible, running) {
     return h('div', { class: 'actionbar' },
       h('button', { class: 'btn', type: 'button', onclick: () => { state.splitDraft = null; render(); } }, 'Cancel'),
       h('button', { class: 'btn primary', type: 'button', onclick: () => saveSplits(scan) }, 'Done'));
+  }
+  if (state.reordering) {
+    return h('div', { class: 'actionbar' },
+      h('button', { class: 'btn primary', type: 'button', onclick: () => { state.reordering = false; render(); } }, 'Done'));
   }
   const none = !visible.length || running;
   const pdf = none
@@ -477,14 +523,230 @@ async function saveSplits(scan) {
   } catch (e) { failed(e); }
 }
 
+function menuRow(name, label, sub, disabled = false, cls = '') {
+  return h('button', { class: `cell ${cls}`, type: 'button', disabled },
+    icon(name), h('div', { class: 'main' }, h('div', { class: 'title' }, label), sub && h('div', { class: 'subtitle' }, sub)));
+}
+
 function openScanMenu(scan) {
-  const rename = h('button', { class: 'cell', type: 'button' }, icon('pencil'), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Rename')));
+  const running = scan.status === 'running';
+  const visibleCount = scan.pages.filter((p) => !p.hidden).length;
+  const sent = (scan.sent || []).length > 0;
+  const wait = running ? 'Wait for the scan to finish.' : null;
+  const rename = menuRow('pencil', 'Rename');
+  const reorder = menuRow('reorder', 'Reorder pages', wait || (visibleCount < 2 ? 'Needs at least two pages.' : null), running || visibleCount < 2);
+  const combine = menuRow('file-plus', 'Combine with another scan',
+    wait || (sent ? 'Already sent to Paperless, which can merge documents.' : null), running || sent);
   const pdf = h('a', { class: 'cell', href: pdfURL(scan.id), download: '' }, icon('download'), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Download as PDF')));
-  const del = h('button', { class: 'cell destructive', type: 'button' }, icon('trash'), h('div', { class: 'main' }, h('div', { class: 'title' }, 'Delete scan')));
-  const sheet = openSheet({ title: scan.name, body: h('div', { class: 'list' }, rename, pdf, del) });
+  const del = menuRow('trash', 'Delete scan', null, false, 'destructive');
+  const sheet = openSheet({ title: scan.name, body: h('div', { class: 'list' }, rename, reorder, combine, pdf, del) });
   rename.addEventListener('click', () => { sheet.close(); setTimeout(() => openRename(scan), 230); });
+  reorder.addEventListener('click', () => {
+    sheet.close();
+    state.splitDraft = null;
+    state.reordering = true;
+    render();
+  });
+  combine.addEventListener('click', () => { sheet.close(); setTimeout(() => openCombine(scan), 230); });
   pdf.addEventListener('click', () => sheet.close());
   del.addEventListener('click', () => { sheet.close(); deleteScan(scan); });
+}
+
+// Scans that can join this one: finished or stopped, with pages, and
+// nothing sent from them.
+async function openCombine(scan) {
+  const body = h('div', {}, h('div', { class: 'empty' }, h('span', { class: 'spinner', style: 'display:inline-block' })));
+  const sheet = openSheet({ title: 'Combine with another scan', lede: 'Pages go in the order they were scanned, as one document.', body });
+  try { state.scans = await api.scans(); } catch (e) { failed(e); sheet.close(); return; }
+  const candidates = state.scans.filter((s) => s.id !== scan.id && s.status !== 'running' && s.pageCount > 0 && s.sent.total === 0);
+  if (!candidates.length) {
+    body.replaceChildren(h('div', { class: 'list' }, h('div', { class: 'empty' }, h('strong', {}, 'No scans to combine'),
+      'Only scans that have pages and haven’t been sent to Paperless can be combined.')));
+    return;
+  }
+  body.replaceChildren(h('div', { class: 'list' }, candidates.map((s) => {
+    const row = h('button', { class: 'cell indent', type: 'button' },
+      h('img', { class: 'thumb', alt: '', loading: 'lazy', src: `/api/scans/${s.id}/pages/${s.coverPage}/image?size=thumb&v=${s.coverKey}` }),
+      h('div', { class: 'main' },
+        h('div', { class: 'title' }, s.name),
+        h('div', { class: 'subtitle num' }, `${dayLabel(s.createdAt)}, ${timeLabel(s.createdAt)} · ${plural(s.pageCount, 'page')}`),
+        s.status === 'failed' && h('div', { class: 'subtitle text-orange' }, 'Stopped early')));
+    row.addEventListener('click', () => { sheet.close(); setTimeout(() => combineWith(scan, s), 230); });
+    return row;
+  })));
+}
+
+async function combineWith(scan, other) {
+  const joins = other.pageCount === 1 ? 'Its page joins' : `Its ${other.pageCount} pages join`;
+  if (!(await confirmSheet({ title: `Combine with “${other.name}”?`, text: `${joins} this scan, and it’s removed from the list.`, confirm: 'Combine' }))) return;
+  try {
+    state.scan = await api.combine(scan.id, other.id);
+    state.scans = await api.scans().catch(() => state.scans);
+    render();
+    toast(`Added ${plural(other.pageCount, 'page')}`);
+  } catch (e) { failed(e); }
+}
+
+/* ---------- Reorder ---------- */
+
+// While reordering, the grid becomes a list of the visible pages with
+// the documents' dividers between them. A page is dragged by its handle,
+// or moved with the arrow keys, and every drop saves.
+function reorderList(scan, docs) {
+  const list = h('div', { class: 'reorder-list' });
+  let n = 0;
+  docs.forEach((pages, d) => {
+    if (d > 0) list.append(h('div', { class: 'divider' }, icon('scissors', 'sm'), `Document ${d + 1}`));
+    for (const p of pages) {
+      const place = { page: ++n, doc: d + 1, docs: docs.length };
+      const handle = h('button', {
+        class: 'handle', type: 'button', 'aria-label': `Move ${placeLabel(place)}`, 'aria-describedby': 'reorder-keys', 'data-focus': `move-${p.id}`,
+      }, icon('grip'));
+      handle.addEventListener('pointerdown', (e) => startDrag(e, scan, p.id));
+      handle.addEventListener('keydown', (e) => keyMove(e, scan, p.id));
+      list.append(h('div', { class: 'reorder-row', 'data-page': p.id },
+        h('img', { alt: '', loading: 'lazy', src: pageImage(scan.id, p, 'thumb') }),
+        h('div', { class: 'main' }, h('div', {}, `Page ${place.page}`), h('div', { class: 'subtitle' }, `Document ${place.doc}`)),
+        handle));
+    }
+  });
+  return h('section', { class: 'group' },
+    h('p', { class: 'group-footer', style: 'margin:0 4px 12px;font-size:15px' }, 'Drag a page by its handle to move it. Each move is saved.'),
+    h('span', { id: 'reorder-keys', class: 'sr-only' }, 'Up and down arrow keys move it.'),
+    list);
+}
+
+let moving = false;
+
+// Arrow keys step through the same places a drag can drop on: within a
+// document a page swaps with its neighbor; at a document's edge it
+// crosses the divider into the next document, keeping its place.
+async function keyMove(e, scan, id) {
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+  e.preventDefault();
+  if (moving) return;
+  const docs = documentsOf(scan).map((pages) => pages.map((p) => p.id));
+  const d = docs.findIndex((pages) => pages.includes(id));
+  const pages = docs[d];
+  const i = pages.indexOf(id);
+  let where = null;
+  if (e.key === 'ArrowUp') {
+    if (i > 0) where = { before: pages[i - 1] };
+    else if (d > 0) where = { after: docs[d - 1].at(-1) };
+  } else if (i < pages.length - 1) where = { after: pages[i + 1] };
+  else if (d < docs.length - 1) where = { before: docs[d + 1][0] };
+  if (!where) return;
+  moving = true;
+  await movePage(scan, id, where);
+  moving = false;
+}
+
+let drag = null;
+
+function startDrag(e, scan, id) {
+  if (drag || moving || e.button !== 0) return;
+  e.preventDefault();
+  const handle = e.currentTarget;
+  const list = handle.closest('.reorder-list');
+  const els = [...list.children];
+  const row = handle.closest('.reorder-row');
+  const from = els.indexOf(row);
+  const geo = els.map((el) => { const r = el.getBoundingClientRect(); return { top: r.top + scrollY, height: r.height }; });
+  handle.setPointerCapture(e.pointerId);
+  drag = { scan, id, handle, list, els, row, from, geo, slot: from, pointerY: e.clientY, startY: e.clientY + scrollY, shifts: els.map(() => 0) };
+  row.classList.add('dragging');
+  list.classList.add('sorting');
+  document.body.classList.add('dragging-page');
+  handle.addEventListener('pointermove', onDragMove);
+  handle.addEventListener('pointerup', onDragEnd);
+  handle.addEventListener('pointercancel', onDragEnd);
+  document.addEventListener('keydown', onDragKey);
+  drag.frame = requestAnimationFrame(dragFrame);
+}
+
+function onDragMove(e) {
+  drag.pointerY = e.clientY;
+  if (Math.abs(e.clientY + scrollY - drag.startY) > 6) drag.moved = true;
+}
+
+function onDragKey(e) {
+  if (e.key === 'Escape') endDrag(false);
+}
+
+function onDragEnd(e) { endDrag(e.type === 'pointerup'); }
+
+// Each frame lays the rows out around the slot the dragged row is over,
+// then scrolls the page while that row reaches under the nav bar or the
+// action bar.
+function dragFrame() {
+  if (!drag) return;
+  const row = layoutDrag();
+  const nav = document.querySelector('.navbar');
+  const bar = document.querySelector('.actionbar');
+  const top = (nav ? nav.getBoundingClientRect().bottom : 0) + 8;
+  const bottom = (bar ? bar.getBoundingClientRect().top : innerHeight) - 8;
+  const over = row.top < top ? row.top - top : row.bottom > bottom ? row.bottom - bottom : 0;
+  if (over && drag.moved) scrollBy(0, Math.max(-16, Math.min(16, Math.round(over / 3))));
+  drag.frame = requestAnimationFrame(dragFrame);
+}
+
+// Returns where the dragged row is in the viewport.
+function layoutDrag() {
+  const { geo, from, els } = drag;
+  const own = geo[from];
+  const first = geo[0].top;
+  const last = geo.at(-1).top + geo.at(-1).height;
+  const dy = Math.max(first - own.top, Math.min(last - own.top - own.height, drag.pointerY + scrollY - drag.startY));
+  const center = own.top + own.height / 2 + dy;
+  let slot = 0;
+  geo.forEach((g, i) => { if (i !== from && g.top + g.height / 2 < center) slot++; });
+  drag.slot = slot;
+  drag.row.style.transform = `translateY(${dy}px)`;
+  els.forEach((el, i) => {
+    if (i === from) return;
+    const j = i < from ? i : i - 1;
+    const shift = (j >= slot ? own.height : 0) - (i > from ? own.height : 0);
+    if (shift !== drag.shifts[i]) {
+      drag.shifts[i] = shift;
+      el.style.transform = shift ? `translateY(${shift}px)` : '';
+    }
+  });
+  const top = own.top + dy - scrollY;
+  return { top, bottom: top + own.height };
+}
+
+// A drop lands after the row above it, or before the row below it when a
+// divider or the top of the list is above. Dropping where the row
+// started, or cancelling, moves nothing.
+async function endDrag(drop) {
+  const { scan, id, handle, list, els, row, from, geo, slot } = drag;
+  cancelAnimationFrame(drag.frame);
+  handle.removeEventListener('pointermove', onDragMove);
+  handle.removeEventListener('pointerup', onDragEnd);
+  handle.removeEventListener('pointercancel', onDragEnd);
+  document.removeEventListener('keydown', onDragKey);
+  document.body.classList.remove('dragging-page');
+  row.classList.remove('dragging');
+  drag = null;
+
+  const others = els.filter((_, i) => i !== from);
+  const above = others[slot - 1];
+  const below = others[slot];
+  let where = null;
+  if (drop && slot !== from) {
+    if (above && above.dataset.page) where = { after: above.dataset.page };
+    else if (below && below.dataset.page) where = { before: below.dataset.page };
+  }
+  if (!where) {
+    els.forEach((el) => { el.style.transform = ''; });
+    setTimeout(() => list.classList.remove('sorting'), 200);
+    return;
+  }
+  const landed = slot <= from ? geo[slot].top : geo[slot].top + geo[slot].height - geo[from].height;
+  row.style.transform = `translateY(${landed - geo[from].top}px)`;
+  moving = true;
+  await movePage(scan, id, where);
+  moving = false;
 }
 
 async function deleteScan(scan) {
@@ -868,32 +1130,39 @@ function adjustControls(p, img) {
   return { top, panel };
 }
 
+// Moves step over hidden pages, which travel with their visible page, so
+// the menu numbers and moves pages as the grid shows them.
 function openPageMenu() {
   const scan = state.scan;
   const p = currentPage();
   const visible = scan.pages.filter((x) => !x.hidden);
   const isSplit = (scan.splits || []).includes(p.id);
-  const pos = scan.pages.indexOf(p);
-  const row = (name, label, sub, onclick, cls = '', disabled = false) =>
-    h('button', { class: `cell ${cls}`, type: 'button', onclick, disabled }, icon(name), h('div', { class: 'main' }, h('div', { class: 'title' }, label), sub && h('div', { class: 'subtitle' }, sub)));
+  const at = visible.indexOf(p);
+  const first = at === 0;
+  const last = at === visible.length - 1;
+  const row = (name, label, sub, onclick, cls = '', disabled = false) => {
+    const el = menuRow(name, label, sub, disabled, cls);
+    el.addEventListener('click', onclick);
+    return el;
+  };
   const sheet = openSheet({
-    title: `Page ${pos + 1}`,
+    title: p.hidden ? 'Hidden page' : `Page ${at + 1}`,
     body: h('div', {},
+      !p.hidden && h('div', { class: 'list', style: 'margin-bottom:16px' },
+        row('arrow-left', 'Move earlier', null, () => move({ before: visible[at - 1].id }), '', first),
+        row('arrow-right', 'Move later', null, () => move({ after: visible[at + 1].id }), '', last),
+        row('chevrons-left', 'Move to start', null, () => move({ before: visible[0].id }), '', first),
+        row('chevrons-right', 'Move to end', null, () => move({ after: visible.at(-1).id }), '', last),
+        !first && row('scissors', isSplit ? 'Join with the document before' : 'Start a new document here', 'Splits this scan into separate Paperless documents.', toggleSplit)),
       h('div', { class: 'list' },
-        row('arrow-left', 'Move earlier', null, () => move(-1), '', pos === 0),
-        row('arrow-right', 'Move later', null, () => move(1), '', pos === scan.pages.length - 1),
-        !p.hidden && visible[0] !== p && row('scissors', isSplit ? 'Join with the document before' : 'Start a new document here', 'Splits this scan into separate Paperless documents.', toggleSplit)),
-      h('div', { class: 'list', style: 'margin-top:16px' },
         h('a', { class: 'cell', href: pdfURL(scan.id, [p.id]), download: '' }, icon('download'),
           h('div', { class: 'main' }, h('div', { class: 'title' }, 'Download this page'), h('div', { class: 'subtitle' }, 'As a PDF, with your edits.')))),
       h('div', { class: 'list', style: 'margin-top:16px' },
         row('trash', 'Delete page', 'Removes this page for good.', del, 'destructive'))),
   });
-  async function move(d) {
-    const order = scan.pages.map((x) => x.id);
-    const [moved] = order.splice(pos, 1);
-    order.splice(pos + d, 0, moved);
-    try { state.scan = await api.reorder(scan.id, order); sheet.close(); drawViewer(); render(); } catch (e) { failed(e); }
+  async function move(where) {
+    sheet.close();
+    if (await movePage(scan, p.id, where)) drawViewer();
   }
   async function toggleSplit() {
     const splits = new Set(scan.splits || []);
@@ -904,7 +1173,9 @@ function openPageMenu() {
     sheet.close();
     if (!(await confirmSheet({ title: 'Delete this page?', text: 'It will be removed from this scan. This can’t be undone.', confirm: 'Delete page', destructive: true }))) return;
     try {
-      const nextId = (scan.pages[pos + 1] || scan.pages[pos - 1] || {}).id;
+      const set = viewerPages();
+      const i = set.indexOf(p);
+      const nextId = (set[i + 1] || set[i - 1] || {}).id;
       await api.deletePage(scan.id, p.id);
       state.scan = await api.scan(scan.id);
       if (nextId) { viewer.pageId = nextId; drawViewer(); } else closeViewer();
@@ -1046,7 +1317,10 @@ function parseRoute() {
 
 let lastSignature = '';
 
+// A redraw replaces every element, so a control marked data-focus gets
+// focus back from its replacement. Nothing redraws mid-drag.
 function render(force = true) {
+  if (drag) return;
   const view = document.getElementById('view');
   const r = state.route;
   const split = sideBySide.matches && (r.name === 'scans' || r.name === 'scan');
@@ -1055,8 +1329,13 @@ function render(force = true) {
   const sig = node.outerHTML;
   if (!force && sig === lastSignature) return;
   lastSignature = sig;
+  const focused = view.contains(document.activeElement) && document.activeElement.dataset.focus;
   view.replaceChildren(node);
   watchTitle(node);
+  if (focused) {
+    const again = node.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
+    if (again) again.focus({ preventScroll: true });
+  }
 }
 
 // The bar title appears once the large title has scrolled out of view.
@@ -1077,7 +1356,9 @@ async function onRoute() {
   state.route = r;
   if (changed) {
     closeViewer();
+    if (drag) endDrag(false);
     state.splitDraft = null;
+    state.reordering = false;
     state.hiddenOpen = false;
     state.notice = null;
     if (r.name === 'scan') { state.scan = null; state.scanError = null; }

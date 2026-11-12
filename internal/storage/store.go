@@ -70,16 +70,39 @@ func (s *Store) CreateJob(meta JobMeta) error {
 	return s.SaveMeta(meta)
 }
 
-// SaveMeta writes (or overwrites) a job's meta.json.
+// SaveMeta writes (or overwrites) a job's meta.json. The new file
+// replaces the old one in a single rename, so a failed or interrupted
+// write leaves the old metadata whole.
 func (s *Store) SaveMeta(meta JobMeta) error {
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return fmt.Errorf("storage: marshal metadata for job %q: %w", meta.ID, err)
 	}
-	if err := os.WriteFile(s.metaPath(meta.ID), data, 0o644); err != nil {
+	if err := replaceFile(s.metaPath(meta.ID), data); err != nil {
 		return fmt.Errorf("storage: write metadata for job %q: %w", meta.ID, err)
 	}
 	return nil
+}
+
+func replaceFile(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(data)
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Chmod(tmp.Name(), 0o644)
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), path)
+	}
+	if err != nil {
+		os.Remove(tmp.Name())
+	}
+	return err
 }
 
 // UpdateMeta loads a job's metadata, lets change edit it, and saves the
@@ -99,6 +122,77 @@ func (s *Store) UpdateMeta(id string, change func(*JobMeta) error) (JobMeta, err
 		return JobMeta{}, err
 	}
 	return meta, nil
+}
+
+// ErrLeftBehind means a combine finished but the job combined away
+// couldn't be deleted, so its pages are in both jobs.
+var ErrLeftBehind = errors.New("storage: the combined-away job couldn't be deleted")
+
+// linkFile is os.Link, replaceable so tests can take the copying path.
+var linkFile = os.Link
+
+// CombineJobs moves the pages of job from into job into, as
+// JobMeta.Combine arranges them, then deletes from, all under one lock.
+// check sees both jobs first and can refuse. The page files land in
+// into before its meta.json is saved, and from goes only after that
+// save, so whenever it stops, every page is still in at least one job.
+// When only the delete fails, the combined job comes back with
+// ErrLeftBehind.
+func (s *Store) CombineJobs(intoID, fromID string, check func(into, from JobMeta) error) (JobMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	into, err := s.LoadMeta(intoID)
+	if err != nil {
+		return JobMeta{}, fmt.Errorf("%w: %v", ErrJobNotFound, err)
+	}
+	from, err := s.LoadMeta(fromID)
+	if err != nil {
+		return JobMeta{}, fmt.Errorf("%w: %v", ErrJobNotFound, err)
+	}
+	if err := check(into, from); err != nil {
+		return JobMeta{}, err
+	}
+
+	combined, files := into.Combine(from)
+	var added []string
+	undo := func() {
+		for _, f := range added {
+			os.Remove(filepath.Join(s.pagesDir(intoID), f))
+		}
+	}
+	for src, dst := range files {
+		if err := copyPageFile(filepath.Join(s.pagesDir(fromID), src), filepath.Join(s.pagesDir(intoID), dst)); err != nil {
+			undo()
+			return JobMeta{}, fmt.Errorf("storage: combine job %q into %q: %w", fromID, intoID, err)
+		}
+		added = append(added, dst)
+		// Renders under this name can only be left from an interrupted
+		// combine, or a page deleted before LastSheet was kept.
+		_ = s.DeleteRenders(intoID, strings.TrimSuffix(dst, filepath.Ext(dst)))
+	}
+	if err := s.SaveMeta(combined); err != nil {
+		undo()
+		return JobMeta{}, err
+	}
+	if err := s.DeleteJob(fromID); err != nil {
+		return combined, fmt.Errorf("%w: %v", ErrLeftBehind, err)
+	}
+	return combined, nil
+}
+
+// copyPageFile hard-links an original into another job, which costs no
+// space, or copies it where linking isn't possible. Anything already at
+// dst is an orphan from an interrupted combine.
+func copyPageFile(src, dst string) error {
+	_ = os.Remove(dst)
+	if linkFile(src, dst) == nil {
+		return nil
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o644)
 }
 
 // LoadMeta reads a job's meta.json.

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"image"
 	"net/http"
-	"slices"
 
 	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
@@ -237,13 +236,10 @@ func (s *Server) handleDeletePage(w http.ResponseWriter, r *http.Request) {
 	pageID := r.PathValue("page")
 	var removed storage.PageMeta
 	meta, ok := s.mutateJob(w, r, func(meta *storage.JobMeta) (int, string) {
-		page, i, found := meta.FindPage(pageID)
-		if !found {
-			return http.StatusNotFound, "page not found"
+		var err error
+		if removed, err = meta.DeletePage(pageID); err != nil {
+			return http.StatusNotFound, err.Error()
 		}
-		removed = page
-		meta.Pages = slices.Delete(meta.Pages, i, i+1)
-		meta.Splits = slices.DeleteFunc(meta.Splits, func(id string) bool { return id == pageID })
 		return 0, ""
 	})
 	if !ok {
@@ -253,6 +249,40 @@ func (s *Server) handleDeletePage(w http.ResponseWriter, r *http.Request) {
 	// leaves an orphan on disk.
 	_ = s.store.DeletePageFile(meta.ID, removed.File)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// movePageRequest names the visible page to move next to: exactly one of
+// After and Before.
+type movePageRequest struct {
+	After  string `json:"after"`
+	Before string `json:"before"`
+}
+
+// handleMovePage moves one visible page next to another, by the rules of
+// storage.JobMeta.MovePage.
+func (s *Server) handleMovePage(w http.ResponseWriter, r *http.Request) {
+	var req movePageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	if (req.After == "") == (req.Before == "") {
+		writeError(w, http.StatusBadRequest, "bad_request", "give exactly one of after and before")
+		return
+	}
+	meta, ok := s.mutateJob(w, r, func(meta *storage.JobMeta) (int, string) {
+		err := meta.MovePage(r.PathValue("page"), req.After+req.Before, req.After != "")
+		switch {
+		case errors.Is(err, storage.ErrPageNotFound):
+			return http.StatusNotFound, err.Error()
+		case err != nil:
+			return http.StatusBadRequest, err.Error()
+		}
+		return 0, ""
+	})
+	if ok {
+		writeJSON(w, http.StatusOK, s.toDetail(meta))
+	}
 }
 
 type reorderPagesRequest struct {
