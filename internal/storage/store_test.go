@@ -52,19 +52,63 @@ func TestStore_SaveMeta_WriteError(t *testing.T) {
 		t.Skip("running as root: permission-based test is unreliable")
 	}
 	s := New(t.TempDir())
-	if err := s.CreateJob(JobMeta{ID: "job1"}); err != nil {
+	if err := s.CreateJob(JobMeta{ID: "job1", Name: "before"}); err != nil {
 		t.Fatal(err)
 	}
-	// Overwriting an existing file's *content* only needs write
-	// permission on the file itself, not its containing directory — so
-	// make meta.json itself read-only to block the rewrite.
-	if err := os.Chmod(s.metaPath("job1"), 0o444); err != nil {
+	// The new meta.json is written beside the old one and renamed over
+	// it, so a read-only job directory blocks the save.
+	if err := os.Chmod(s.jobDir("job1"), 0o555); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(s.metaPath("job1"), 0o644)
+	defer os.Chmod(s.jobDir("job1"), 0o755)
 
 	if err := s.SaveMeta(JobMeta{ID: "job1", Name: "changed"}); err == nil {
 		t.Fatal("expected a write error")
+	}
+	if meta, err := s.LoadMeta("job1"); err != nil || meta.Name != "before" {
+		t.Errorf("a failed save must leave the old metadata whole: %+v, %v", meta, err)
+	}
+}
+
+func TestStore_SaveMeta_ReplacesInOneStep(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.CreateJob(JobMeta{ID: "job1", Name: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveMeta(JobMeta{ID: "job1", Name: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(s.jobDir("job1"))
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 || names[0] != "meta.json" || names[1] != "pages" {
+		t.Errorf("job directory holds %v: no temporary file should be left", names)
+	}
+	if info, err := os.Stat(s.metaPath("job1")); err != nil || info.Mode().Perm() != 0o644 {
+		t.Errorf("meta.json mode %v, %v: want 0644", info.Mode().Perm(), err)
+	}
+}
+
+func TestReplaceFile_Errors(t *testing.T) {
+	dir := t.TempDir()
+	if err := replaceFile(filepath.Join(dir, "missing", "f"), []byte("x")); err == nil {
+		t.Error("a missing directory should fail")
+	}
+	// Renaming a file over a directory fails, after the temporary file
+	// was written; it must not be left behind.
+	if err := os.Mkdir(filepath.Join(dir, "taken"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "taken", "x"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceFile(filepath.Join(dir, "taken"), []byte("x")); err == nil {
+		t.Error("renaming over a non-empty directory should fail")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("left behind: %v", entries)
 	}
 }
 
@@ -431,12 +475,155 @@ func TestStore_UpdateMeta(t *testing.T) {
 		t.Errorf("unknown job: got %v", err)
 	}
 
-	metaPath := filepath.Join(s.Root(), "jobs", "job1", "meta.json")
-	if err := os.Chmod(metaPath, 0o444); err != nil {
+	if err := os.Chmod(s.jobDir("job1"), 0o555); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(metaPath, 0o644) })
+	t.Cleanup(func() { os.Chmod(s.jobDir("job1"), 0o755) })
 	if _, err := s.UpdateMeta("job1", func(*JobMeta) error { return nil }); err == nil {
 		t.Error("a failed save should surface")
+	}
+}
+
+// combineFixture saves two jobs with one original each and a cached
+// render, and returns the store.
+func combineFixture(t *testing.T) *Store {
+	t.Helper()
+	s := New(t.TempDir())
+	t0 := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	into := layout("1f 1b-")
+	into.ID, into.CreatedAt = "into", t0
+	from := layout("1f")
+	from.ID, from.CreatedAt = "from", t0.Add(time.Minute)
+	for _, j := range []JobMeta{into, from} {
+		if err := s.CreateJob(j); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range j.Pages {
+			if err := s.SavePageFile(j.ID, p.File, []byte(j.ID+"/"+p.ID)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := s.SaveRender("into", "002f", "k", []byte("stale")); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func noCheck(JobMeta, JobMeta) error { return nil }
+
+func TestStore_CombineJobs(t *testing.T) {
+	s := combineFixture(t)
+	got, err := s.CombineJobs("into", "from", noCheck)
+	if err != nil || describe(got) != "1f 1b- 2f" {
+		t.Fatalf("got %q, %v", describe(got), err)
+	}
+	if saved, _ := s.LoadMeta("into"); describe(saved) != "1f 1b- 2f" {
+		t.Errorf("saved %q", describe(saved))
+	}
+	if data, err := s.LoadPageFile("into", "002f.jpg"); err != nil || string(data) != "from/001f" {
+		t.Errorf("the incoming original: %q, %v", data, err)
+	}
+	if _, ok := s.LoadRender("into", "002f", "k"); ok {
+		t.Error("a render left under the incoming page's name must be dropped")
+	}
+	if _, err := s.LoadMeta("from"); err == nil {
+		t.Error("the combined-away job should be deleted")
+	}
+}
+
+func TestStore_CombineJobs_CopiesWhereItCantLink(t *testing.T) {
+	s := combineFixture(t)
+	linkFile = func(string, string) error { return errors.New("no links here") }
+	t.Cleanup(func() { linkFile = os.Link })
+	if _, err := s.CombineJobs("into", "from", noCheck); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := s.LoadPageFile("into", "002f.jpg"); string(data) != "from/001f" {
+		t.Errorf("copied original: %q", data)
+	}
+}
+
+// unchanged checks a refused combine left both jobs as they were.
+func unchanged(t *testing.T, s *Store) {
+	t.Helper()
+	if into, _ := s.LoadMeta("into"); describe(into) != "1f 1b-" {
+		t.Errorf("into changed: %q", describe(into))
+	}
+	if from, err := s.LoadMeta("from"); err != nil || describe(from) != "1f" {
+		t.Errorf("from changed: %q, %v", describe(from), err)
+	}
+	if _, err := s.LoadPageFile("into", "002f.jpg"); err == nil {
+		t.Error("an incoming original was left behind")
+	}
+}
+
+func TestStore_CombineJobs_Refusals(t *testing.T) {
+	s := combineFixture(t)
+	if _, err := s.CombineJobs("nope", "from", noCheck); !errors.Is(err, ErrJobNotFound) {
+		t.Errorf("unknown into: %v", err)
+	}
+	if _, err := s.CombineJobs("into", "nope", noCheck); !errors.Is(err, ErrJobNotFound) {
+		t.Errorf("unknown from: %v", err)
+	}
+	stop := errors.New("refused")
+	if _, err := s.CombineJobs("into", "from", func(JobMeta, JobMeta) error { return stop }); !errors.Is(err, stop) {
+		t.Errorf("check: %v", err)
+	}
+	unchanged(t, s)
+}
+
+func TestStore_CombineJobs_MissingOriginal(t *testing.T) {
+	s := combineFixture(t)
+	from, _ := s.LoadMeta("from")
+	from.Pages = append(from.Pages, layout("2f").Pages...)
+	if err := s.SaveMeta(from); err != nil {
+		t.Fatal(err)
+	}
+	linkFile = func(string, string) error { return errors.New("no links here") }
+	t.Cleanup(func() { linkFile = os.Link })
+	if _, err := s.CombineJobs("into", "from", noCheck); err == nil {
+		t.Fatal("an original that can't be read must stop the combine")
+	}
+	if into, _ := s.LoadMeta("into"); describe(into) != "1f 1b-" {
+		t.Errorf("into changed: %q", describe(into))
+	}
+	for _, f := range []string{"002f.jpg", "003f.jpg"} {
+		if _, err := s.LoadPageFile("into", f); err == nil {
+			t.Errorf("%s was left behind", f)
+		}
+	}
+}
+
+func TestStore_CombineJobs_SaveFailureChangesNothing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-based test is unreliable")
+	}
+	s := combineFixture(t)
+	if err := os.Chmod(s.jobDir("into"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(s.jobDir("into"), 0o755) })
+	if _, err := s.CombineJobs("into", "from", noCheck); err == nil || errors.Is(err, ErrLeftBehind) {
+		t.Fatalf("got %v, want the save's error", err)
+	}
+	unchanged(t, s)
+}
+
+func TestStore_CombineJobs_LeftBehind(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-based test is unreliable")
+	}
+	s := combineFixture(t)
+	if err := os.Chmod(s.jobDir("from"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(s.jobDir("from"), 0o755) })
+	got, err := s.CombineJobs("into", "from", noCheck)
+	if !errors.Is(err, ErrLeftBehind) || describe(got) != "1f 1b- 2f" {
+		t.Fatalf("got %q, %v: want the combined job and ErrLeftBehind", describe(got), err)
+	}
+	if _, err := s.LoadMeta("from"); err != nil {
+		t.Error("a job that couldn't be deleted is still there, so no page is lost")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"slices"
 	"strings"
@@ -234,6 +235,51 @@ func (s *Server) handleUpdateScan(w http.ResponseWriter, r *http.Request) {
 	}); ok {
 		writeJSON(w, http.StatusOK, s.toDetail(meta))
 	}
+}
+
+type combineRequest struct {
+	From string `json:"from"`
+}
+
+var errAlreadySent = errors.New("a scan that has sent anything to Paperless can't be combined")
+
+// handleCombine moves another scan's pages into this one, then deletes
+// that scan. Its pages already in Paperless can only be merged there.
+func (s *Server) handleCombine(w http.ResponseWriter, r *http.Request) {
+	var req combineRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	id := r.PathValue("id")
+	if req.From == "" || req.From == id {
+		writeError(w, http.StatusBadRequest, "bad_request", "from must name another scan")
+		return
+	}
+	if s.isScanning(id) || s.isScanning(req.From) {
+		writeError(w, http.StatusConflict, "scan_running", "a scan that's still scanning can't be combined")
+		return
+	}
+	meta, err := s.store.CombineJobs(id, req.From, func(into, from storage.JobMeta) error {
+		if len(into.Sent) > 0 || len(from.Sent) > 0 {
+			return errAlreadySent
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, storage.ErrLeftBehind):
+		log.Printf("combine %s into %s: %v", req.From, id, err)
+	case errors.Is(err, errAlreadySent):
+		writeError(w, http.StatusConflict, "already_sent", err.Error())
+		return
+	case errors.Is(err, storage.ErrJobNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "job not found")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.toDetail(meta))
 }
 
 func (s *Server) handleDeleteScan(w http.ResponseWriter, r *http.Request) {

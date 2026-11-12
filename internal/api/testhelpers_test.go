@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/draw"
 	"image/jpeg"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -131,6 +133,11 @@ func seedJob(t *testing.T, store *storage.Store, id string, pages ...seedPage) s
 			XDPI: 300, YDPI: 300, WidthPx: 60, HeightPx: 90,
 			Hidden: p.hidden, Edits: p.edits,
 		}
+		var side byte
+		fmt.Sscanf(p.id, "%03d%c", &page.Sheet, &side)
+		if side == 'b' {
+			page.Side = "back"
+		}
 		if err := store.SavePageFile(id, page.File, jpegBytes(t, textImage(60, 90))); err != nil {
 			t.Fatal(err)
 		}
@@ -162,4 +169,49 @@ func runningServer(t *testing.T) (*Server, *storage.Store, string, chan struct{}
 		}
 	})
 	return srv, store, decode[startScanResponse](t, rec).JobID, release
+}
+
+// stripes is a page told apart from others by how far apart its bars are.
+func stripes(every int) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, 60, 90))
+	draw.Draw(img, img.Bounds(), image.White, image.Point{}, draw.Src)
+	for y := 3; y < 90; y += every {
+		draw.Draw(img, image.Rect(5, y, 55, y+2), image.Black, image.Point{}, draw.Src)
+	}
+	return img
+}
+
+// layoutOf lists a scan's pages in order: a trailing - marks a hidden
+// page, and a leading | a split.
+func layoutOf(got jobDetailResponse) string {
+	var out []string
+	for _, p := range got.Pages {
+		tok := p.ID
+		if p.Hidden {
+			tok += "-"
+		}
+		if slices.Contains(got.Splits, p.ID) {
+			tok = "|" + tok
+		}
+		out = append(out, tok)
+	}
+	return strings.Join(out, " ")
+}
+
+// sendAsShown sends a scan the way the app does: one Paperless document
+// per document the splits cut.
+func sendAsShown(t *testing.T, srv *Server, store *storage.Store, id string) {
+	t.Helper()
+	meta, err := store.LoadMeta(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var docs []map[string]any
+	for _, pages := range meta.Documents() {
+		docs = append(docs, map[string]any{"pages": pages})
+	}
+	if rec := do(srv, http.MethodPost, "/api/scans/"+id+"/send", map[string]any{"documents": docs}); rec.Code != http.StatusAccepted {
+		t.Fatalf("send: %d %s", rec.Code, rec.Body)
+	}
+	srv.background.Wait()
 }
