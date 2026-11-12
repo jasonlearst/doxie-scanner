@@ -231,6 +231,12 @@ Everything is JSON unless noted. There's no authentication.
 | `GET /api/paperless`, `/api/paperless/metadata` | Connection status; tags, correspondents and document types |
 | `GET /api/version` | The release this build came from |
 
+In `GET /api/scans/{id}`, each back has `blank`, `hidden` and `ink`.
+`ink` is what decided `blank`: `sheet` is the share of the sheet darker
+than paper, and `densest` the share in its most printed half-inch. A
+back is blank only when both are low. Scans saved before `ink` was
+recorded don't have it.
+
 Errors look like `{"error": {"code": "no_paper", "message": "..."}}`.
 
 ## Releasing

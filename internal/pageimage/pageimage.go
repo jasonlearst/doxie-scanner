@@ -39,40 +39,6 @@ func analysisCopy(img image.Image) *image.NRGBA {
 	return imaging.Resize(img, analysisWidth, 0, imaging.Box)
 }
 
-// Genuine blank backs measure an ink fraction of roughly 0.003–0.012
-// (show-through and shading), printed content 0.05+. A back with only a
-// signature can land below the threshold, which is why the caller hides
-// blank sides instead of discarding them.
-const (
-	blankDarkThreshold        = 180
-	blankInkFractionThreshold = 0.02
-)
-
-// IsBlankPaper reports whether the sheet, as straightened and cropped by e,
-// looks unprinted. Judging the whole scan would count the darker backing
-// beside a narrow sheet as ink.
-func IsBlankPaper(img image.Image, e Edits) bool {
-	small := analysisCopy(img)
-	f := float64(small.Rect.Dx()) / float64(img.Bounds().Dx())
-	return IsBlank(Render(small, Edits{Straighten: e.Straighten, Rotation: e.Rotation, Crop: e.scaled(f).Crop}))
-}
-
-// IsBlank reports whether a side looks unprinted.
-func IsBlank(img image.Image) bool {
-	small := analysisCopy(img)
-	total, dark := 0, 0
-	forEachPixel(small, func(r, g, b uint8) {
-		total++
-		if luma(r, g, b) < blankDarkThreshold {
-			dark++
-		}
-	})
-	if total == 0 {
-		return true
-	}
-	return float64(dark)/float64(total) < blankInkFractionThreshold
-}
-
 // Auto color only counts pixels in flat neighborhoods: real color areas
 // and gray shading have smooth interiors, while text edges (blurred into
 // mid-tones by downscaling) and the color fringes a sheet-fed scanner
