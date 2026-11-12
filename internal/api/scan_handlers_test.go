@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andiapps-dev/doxie-scanner/internal/pageimage"
 	"github.com/andiapps-dev/doxie-scanner/internal/scanjobs"
 	"github.com/andiapps-dev/doxie-scanner/internal/scsiusb"
 	"github.com/andiapps-dev/doxie-scanner/internal/storage"
@@ -151,6 +153,28 @@ func TestGetScan(t *testing.T) {
 	}
 	if rec := do(srv, http.MethodGet, "/api/scans/nope", nil); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown job: %d", rec.Code)
+	}
+}
+
+func TestGetScan_ReturnsABacksInk(t *testing.T) {
+	srv, store := newTestServer(t, &fakeDriver{})
+	meta := seedJob(t, store, "job1", seedPage{id: "001f"}, seedPage{id: "001b"})
+	meta.Pages[1].Ink = &pageimage.Ink{Sheet: 0.0179, Densest: 0.193}
+	if err := store.SaveMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+
+	var got struct {
+		Pages []map[string]json.RawMessage `json:"pages"`
+	}
+	if err := json.Unmarshal(do(srv, http.MethodGet, "/api/scans/job1", nil).Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if ink, ok := got.Pages[0]["ink"]; ok {
+		t.Errorf("a page without measurements should have no ink, got %s", ink)
+	}
+	if ink := string(got.Pages[1]["ink"]); ink != `{"sheet":0.0179,"densest":0.193}` {
+		t.Errorf("ink: %s", ink)
 	}
 }
 

@@ -194,6 +194,34 @@ func TestScan_AutoSidesHidesBlankBacksButKeepsThem(t *testing.T) {
 	}
 }
 
+// sparseBack is a short 300 dpi sheet on slightly tinted stock with one
+// small block of print in a corner, too little to notice across the whole
+// sheet.
+func sparseBack() *image.NRGBA {
+	img := page(color.Gray{Y: 225}, 2550, 1100)
+	for y := 120; y < 340; y += 24 {
+		draw.Draw(img, image.Rect(1800, y, 2350, y+5), image.Black, image.Point{}, draw.Src)
+	}
+	return img
+}
+
+func TestScan_AutoSidesKeepsABackWithPrintInOneCorner(t *testing.T) {
+	sparse, white := side(t, sparseBack()), side(t, page(color.White, 2550, 1100))
+	_, meta, _ := scan(t, storage.ScanSettings{Sides: SidesAuto},
+		sheet(side(t, textPage()), &sparse),
+		sheet(side(t, textPage()), &white))
+
+	if b := meta.Pages[1]; b.Blank || b.Hidden || b.Ink == nil || b.Ink.Densest < 0.15 {
+		t.Errorf("the printed back should be shown, with its ink: blank=%v hidden=%v ink=%+v", b.Blank, b.Hidden, b.Ink)
+	}
+	if b := meta.Pages[3]; !b.Blank || !b.Hidden || b.Ink == nil || b.Ink.Densest != 0 {
+		t.Errorf("the white back should still be hidden: blank=%v hidden=%v ink=%+v", b.Blank, b.Hidden, b.Ink)
+	}
+	if f := meta.Pages[0]; f.Ink != nil {
+		t.Errorf("fronts aren't judged, so carry no ink: %+v", f.Ink)
+	}
+}
+
 // narrowSheet is a sheet narrower than the scanner, on its gray backing.
 func narrowSheet(printed bool) *image.NRGBA {
 	img := page(color.NRGBA{176, 178, 177, 255}, 600, 800)

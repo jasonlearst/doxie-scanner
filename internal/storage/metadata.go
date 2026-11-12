@@ -50,6 +50,9 @@ type PageMeta struct {
 	Blank    bool            `json:"blank,omitempty"`
 	Hidden   bool            `json:"hidden,omitempty"`
 	Edits    pageimage.Edits `json:"edits"`
+	// Ink is what judged a back blank or printed. Fronts aren't judged, and
+	// scans from before it was recorded don't have it.
+	Ink *pageimage.Ink `json:"ink,omitempty"`
 	// Paper is where the sheet was found, kept so the crop tool can go back
 	// to it after the person changes the crop.
 	Paper *pageimage.Paper `json:"paper,omitempty"`
